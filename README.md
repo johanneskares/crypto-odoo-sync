@@ -20,6 +20,37 @@ bun run setup
 bun run sync
 ```
 
+## Download Latest Release
+
+Latest release page:
+
+`https://github.com/johanneskares/crypto-odoo-sync/releases/latest`
+
+Direct latest assets:
+
+- macOS x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz`
+- Linux x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-linux-x64.tar.gz`
+- Windows x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-windows-x64.zip`
+
+Test with curl (macOS):
+
+```bash
+curl -L -o crypto-odoo-sync-macos-x64.tar.gz \
+  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz
+tar -xzf crypto-odoo-sync-macos-x64.tar.gz
+chmod +x crypto-odoo-sync-macos-x64
+./crypto-odoo-sync-macos-x64 --help
+```
+
+If your repo is private, use a GitHub token:
+
+```bash
+curl -L \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -o crypto-odoo-sync-macos-x64.tar.gz \
+  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz
+```
+
 ## Setup (`bun run setup`)
 
 The setup command is interactive and asks for:
@@ -30,7 +61,7 @@ The setup command is interactive and asks for:
 - Odoo journal (existing or create new, scoped to selected company)
 - Network (all `viem/chains` options)
 - ERC-20 token address (USDC/EURC suggestions + custom input)
-- Optional wallet filter
+- Wallet address filter (required)
 
 It saves your configuration to:
 
@@ -63,5 +94,6 @@ bun run start -- --help
 
 ## Tips
 
-- Use a wallet filter unless you intentionally want full-token history.
+- This tool only ingests transfers for one configured wallet address.
+- Release binaries are built with Bun baseline targets for broader CPU compatibility.
 - If setup fails, run `bun run setup` again to overwrite config.
