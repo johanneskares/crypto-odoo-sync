@@ -2,7 +2,7 @@
 import { Command, Prompt } from "@effect/cli";
 import { NodeContext, NodeHttpClient, NodeRuntime } from "@effect/platform-node";
 import { Console, Effect, Layer } from "effect";
-import { isAddress, type Address } from "viem";
+import type { Address } from "viem";
 
 import {
   type AppConfig,
@@ -49,14 +49,6 @@ const promptRequired = (message: string, defaultValue?: string) =>
         value.trim().length > 0 ? Effect.succeed(value) : Effect.fail("Value is required."),
     })
   ).pipe(Effect.map((value) => value.trim()));
-
-const promptConfirm = (message: string, initial = true) =>
-  Prompt.run(
-    Prompt.confirm({
-      message,
-      initial,
-    })
-  );
 
 const promptSelect = <A>(
   message: string,
@@ -223,21 +215,9 @@ const setupProgram = Effect.gen(function* () {
   const network = yield* pickNetwork();
   const token = yield* pickTokenAddress(network);
 
-  const shouldSetWalletFilter = yield* promptConfirm(
-    "Set a wallet address filter? (recommended to avoid huge imports)",
-    existing?.walletAddress != null
+  const walletAddress = yield* promptRequired("Wallet address (required, 0x...)", existing?.walletAddress ?? "").pipe(
+    Effect.flatMap((value) => RpcService.assertAddress(value, "wallet address"))
   );
-
-  let walletAddress: Address | undefined = existing?.walletAddress;
-  if (shouldSetWalletFilter) {
-    const walletAddressRaw = yield* promptRequired("Wallet address (0x...)", existing?.walletAddress ?? "");
-    if (!isAddress(walletAddressRaw)) {
-      return yield* Effect.fail(new Error(`Invalid wallet address: ${walletAddressRaw}`));
-    }
-    walletAddress = walletAddressRaw as Address;
-  } else {
-    walletAddress = undefined;
-  }
 
   const config: AppConfig = {
     companyId: selectedCompany.id,
@@ -249,7 +229,7 @@ const setupProgram = Effect.gen(function* () {
     odooUrl,
     tokenAddress: token.tokenAddress,
     tokenSymbol: token.tokenSymbol,
-    ...(walletAddress ? { walletAddress } : {}),
+    walletAddress,
   };
 
   const configPath = yield* saveConfig(config);
@@ -260,9 +240,7 @@ const setupProgram = Effect.gen(function* () {
   yield* Console.log(`Journal: ${journalName} (id=${journalId})`);
   yield* Console.log(`Network: ${getNetworkDisplayName(network)} (${network})`);
   yield* Console.log(`Token: ${token.tokenAddress}`);
-  if (walletAddress) {
-    yield* Console.log(`Wallet filter: ${walletAddress}`);
-  }
+  yield* Console.log(`Wallet filter: ${walletAddress}`);
 });
 
 const toStatementLine = (config: AppConfig, transfer: TransferRecord) => {
@@ -289,6 +267,12 @@ const chunk = <T>(items: readonly T[], chunkSize: number): T[][] => {
 
 const syncProgram = Effect.gen(function* () {
   const config = yield* loadConfig();
+  const walletAddress = config.walletAddress;
+  if (!walletAddress) {
+    return yield* Effect.fail(
+      new Error("Wallet address is required. Run `bun run setup` to configure a wallet filter.")
+    );
+  }
 
   const fromDate = yield* promptRequired("From date (YYYY-MM-DD)", defaultFromDate());
   const toDate = yield* promptRequired("To date (YYYY-MM-DD)", todayIso());
@@ -300,7 +284,7 @@ const syncProgram = Effect.gen(function* () {
     network: config.network,
     toDate,
     tokenAddress: config.tokenAddress,
-    ...(config.walletAddress ? { walletAddress: config.walletAddress } : {}),
+    walletAddress,
   });
 
   if (transfers.length === 0) {

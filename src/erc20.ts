@@ -211,13 +211,6 @@ const fetchTransfers = (
     return logs;
   });
 
-const fetchAllTransfers = (
-  client: AnyPublicClient,
-  tokenAddress: Address,
-  fromBlock: bigint,
-  toBlock: bigint
-): Effect.Effect<TransferLog[], ChainError> => fetchTransfers(client, tokenAddress, fromBlock, toBlock);
-
 const fetchWalletTransfers = (
   client: AnyPublicClient,
   tokenAddress: Address,
@@ -276,7 +269,7 @@ export const getTransferRecords = (params: {
   tokenAddress: Address;
   fromDate: string;
   toDate: string;
-  walletAddress?: Address;
+  walletAddress: Address;
 }): Effect.Effect<readonly TransferRecord[], ChainError> =>
   Effect.gen(function* () {
     const fromTimestamp = yield* parseUtcDate(params.fromDate, false);
@@ -321,9 +314,7 @@ export const getTransferRecords = (params: {
 
     const tokenMeta = yield* fetchTokenMeta(client, params.tokenAddress);
 
-    const rawLogs = params.walletAddress
-      ? yield* fetchWalletTransfers(client, params.tokenAddress, params.walletAddress, fromBlock, toBlock)
-      : yield* fetchAllTransfers(client, params.tokenAddress, fromBlock, toBlock);
+    const rawLogs = yield* fetchWalletTransfers(client, params.tokenAddress, params.walletAddress, fromBlock, toBlock);
 
     if (rawLogs.length === 0) {
       return [];
@@ -333,7 +324,7 @@ export const getTransferRecords = (params: {
     const timestamps = yield* resolveBlockTimestamps(client, uniqueBlocks);
     const timestampByBlock = new Map(timestamps.map((entry) => [entry.blockNumber.toString(), entry.timestamp]));
 
-    const walletLower = params.walletAddress?.toLowerCase();
+    const walletLower = params.walletAddress.toLowerCase();
 
     const mapped = rawLogs
       .map((entry) => {
@@ -351,12 +342,7 @@ export const getTransferRecords = (params: {
         }
 
         const unsignedAmount = Number(formatUnits(value, tokenMeta.decimals));
-        const signedAmount =
-          walletLower == null
-            ? unsignedAmount
-            : to.toLowerCase() === walletLower
-              ? unsignedAmount
-              : -unsignedAmount;
+        const signedAmount = to.toLowerCase() === walletLower ? unsignedAmount : -unsignedAmount;
 
         return {
           amount: signedAmount,
