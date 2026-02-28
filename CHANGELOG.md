@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.1.0...v1.2.0) (2026-02-28)
+
+
+### Features
+
+* support multi-config profiles and format config json ([404e868](https://github.com/johanneskares/crypto-odoo-sync/commit/404e8683e567544d40dd6393c49e486c8b47597a))
+
 # [1.1.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.5...v1.1.0) (2026-02-28)
 
 
