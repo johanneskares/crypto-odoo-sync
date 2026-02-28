@@ -28,18 +28,18 @@ Latest release page:
 
 Direct latest assets:
 
-- macOS x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz`
+- macOS universal (arm64 + x64): `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-universal.tar.gz`
 - Linux x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-linux-x64.tar.gz`
 - Windows x64: `https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-windows-x64.zip`
 
 Test with curl (macOS):
 
 ```bash
-curl -L -o crypto-odoo-sync-macos-x64.tar.gz \
-  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz
-tar -xzf crypto-odoo-sync-macos-x64.tar.gz
-chmod +x crypto-odoo-sync-macos-x64
-./crypto-odoo-sync-macos-x64 --help
+curl -L -o crypto-odoo-sync-macos-universal.tar.gz \
+  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-universal.tar.gz
+tar -xzf crypto-odoo-sync-macos-universal.tar.gz
+chmod +x crypto-odoo-sync-macos-universal
+./crypto-odoo-sync-macos-universal --help
 ```
 
 If your repo is private, use a GitHub token:
@@ -47,8 +47,8 @@ If your repo is private, use a GitHub token:
 ```bash
 curl -L \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -o crypto-odoo-sync-macos-x64.tar.gz \
-  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-x64.tar.gz
+  -o crypto-odoo-sync-macos-universal.tar.gz \
+  https://github.com/johanneskares/crypto-odoo-sync/releases/latest/download/crypto-odoo-sync-macos-universal.tar.gz
 ```
 
 ## Setup (`bun run setup`)

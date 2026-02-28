@@ -27,8 +27,8 @@
             "label": "crypto-odoo-sync (linux x64, tar.gz)"
           },
           {
-            "path": "dist/crypto-odoo-sync-macos-x64.tar.gz",
-            "label": "crypto-odoo-sync (macos x64, tar.gz)"
+            "path": "dist/crypto-odoo-sync-macos-universal.tar.gz",
+            "label": "crypto-odoo-sync (macos universal arm64+x64, tar.gz)"
           },
           {
             "path": "dist/crypto-odoo-sync-windows-x64.zip",

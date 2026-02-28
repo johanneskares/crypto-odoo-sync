@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
@@ -44,9 +44,9 @@ jobs:
       - name: Package binaries
         run: |
           chmod +x dist/crypto-odoo-sync-linux-x64
-          chmod +x dist/crypto-odoo-sync-macos-x64
+          chmod +x dist/crypto-odoo-sync-macos-universal
           tar -C dist -czf dist/crypto-odoo-sync-linux-x64.tar.gz crypto-odoo-sync-linux-x64
-          tar -C dist -czf dist/crypto-odoo-sync-macos-x64.tar.gz crypto-odoo-sync-macos-x64
+          tar -C dist -czf dist/crypto-odoo-sync-macos-universal.tar.gz crypto-odoo-sync-macos-universal
           cd dist
           zip -j crypto-odoo-sync-windows-x64.zip crypto-odoo-sync-windows-x64.exe
 
