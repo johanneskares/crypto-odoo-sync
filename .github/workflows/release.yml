@@ -41,6 +41,15 @@ jobs:
       - name: Build binaries
         run: bun run build:binaries
 
+      - name: Package binaries
+        run: |
+          chmod +x dist/crypto-odoo-sync-linux-x64
+          chmod +x dist/crypto-odoo-sync-macos-x64
+          tar -C dist -czf dist/crypto-odoo-sync-linux-x64.tar.gz crypto-odoo-sync-linux-x64
+          tar -C dist -czf dist/crypto-odoo-sync-macos-x64.tar.gz crypto-odoo-sync-macos-x64
+          cd dist
+          zip -j crypto-odoo-sync-windows-x64.zip crypto-odoo-sync-windows-x64.exe
+
       - name: Semantic release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
