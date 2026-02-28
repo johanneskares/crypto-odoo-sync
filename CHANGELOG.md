@@ -1,3 +1,5 @@
+## [1.0.5](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.4...v1.0.5) (2026-02-28)
+
 ## [1.0.4](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.3...v1.0.4) (2026-02-28)
 
 
