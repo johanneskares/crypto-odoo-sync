@@ -23,8 +23,16 @@
       {
         "assets": [
           {
-            "path": "dist/crypto-odoo-sync",
-            "label": "crypto-odoo-sync (linux binary)"
+            "path": "dist/crypto-odoo-sync-linux-x64",
+            "label": "crypto-odoo-sync (linux x64)"
+          },
+          {
+            "path": "dist/crypto-odoo-sync-macos-x64",
+            "label": "crypto-odoo-sync (macos x64)"
+          },
+          {
+            "path": "dist/crypto-odoo-sync-windows-x64.exe",
+            "label": "crypto-odoo-sync (windows x64)"
           }
         ],
         "successComment": false,
