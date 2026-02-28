@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.5...v1.1.0) (2026-02-28)
+
+
+### Features
+
+* require wallet filter for transfer ingestion ([203e3c3](https://github.com/johanneskares/crypto-odoo-sync/commit/203e3c3552191f10c4eb60c4cbb938315e5c90bc))
+
 ## [1.0.5](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.4...v1.0.5) (2026-02-28)
 
 ## [1.0.4](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.0.3...v1.0.4) (2026-02-28)
