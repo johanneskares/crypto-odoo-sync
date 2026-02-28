@@ -114,7 +114,11 @@ const pickTokenAddress = (network: string) =>
     ]);
 
     if (tokenChoice.tokenAddress) {
-      return tokenChoice;
+      const validatedTokenAddress = yield* RpcService.assertAddress(tokenChoice.tokenAddress, "ERC-20 address");
+      return {
+        tokenAddress: validatedTokenAddress,
+        tokenSymbol: tokenChoice.tokenSymbol,
+      };
     }
 
     const inputAddress = yield* promptRequired("ERC-20 contract address (0x...)");
