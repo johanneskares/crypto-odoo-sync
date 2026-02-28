@@ -1,63 +1,67 @@
 # crypto-odoo-sync
 
-CLI tool to import ERC-20 transfer transaction data into an Odoo journal (`account.bank.statement.line`) using Odoo JSON-2 APIs.
+CLI to sync ERC-20 transfer transactions into Odoo journal statement lines (`account.bank.statement.line`).
 
-## Features
+## What You Need
 
-- Native `@effect/cli` command structure with interactive `Prompt` flows
-- Company-aware setup: select Odoo company first, then scope journal selection/creation to that company
-- Odoo journal selection: pick existing or create new
-- Network support: every chain exported by `viem/chains` (using each chain's built-in default RPC URL)
-- ERC-20 suggestions for USDC and EURC + custom token address
-- Optional wallet filter to scope transfer logs
-- `sync` command prompts date range and imports transaction-only statement lines
-- De-duplication via `unique_import_id`
+- Bun installed
+- Odoo URL (for example `https://your-company.odoo.com`)
+- Odoo API key with access to:
+  - `res.company`
+  - `account.journal`
+  - `account.bank.statement.line`
+- ERC-20 contract address (or pick one of the built-in suggestions)
 
-## Install
+## Quick Start
 
 ```bash
 bun install
-```
-
-## Configure
-
-```bash
 bun run setup
-```
-
-This writes config to:
-
-```text
-.erc20-odoo-sync.config.json
-```
-
-## Run sync
-
-```bash
 bun run sync
 ```
 
-or
+## Setup (`bun run setup`)
 
-```bash
-bun run transfer
-```
+The setup command is interactive and asks for:
 
-You will be prompted for:
+- Odoo URL
+- Odoo API key
+- Odoo company (selected first)
+- Odoo journal (existing or create new, scoped to selected company)
+- Network (all `viem/chains` options)
+- ERC-20 token address (USDC/EURC suggestions + custom input)
+- Optional wallet filter
 
+It saves your configuration to:
+
+`.erc20-odoo-sync.config.json`
+
+## Sync (`bun run sync`)
+
+Prompts for:
 - `from` date (`YYYY-MM-DD`)
 - `to` date (`YYYY-MM-DD`)
 
-The command fetches ERC-20 `Transfer` logs and creates `account.bank.statement.line` entries in Odoo.
+Then it:
+- reads ERC-20 `Transfer` logs
+- converts them to Odoo statement lines
+- de-duplicates by `unique_import_id`
+- creates new lines in Odoo
 
-## Help
+Alias:
+
+`bun run transfer`
+
+## Commands
 
 ```bash
+bun run setup
+bun run sync
+bun run transfer
 bun run start -- --help
 ```
 
-## Notes
+## Tips
 
-- Odoo URL is required (for example `https://your-company.odoo.com`).
-- Odoo API key must have permissions to read/create journals and statement lines.
-- Importing without a wallet filter on high-volume tokens can return very large datasets.
+- Use a wallet filter unless you intentionally want full-token history.
+- If setup fails, run `bun run setup` again to overwrite config.
