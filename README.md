@@ -64,8 +64,9 @@ When creating/editing a profile, it asks for:
 - Odoo API key
 - Odoo company (selected first)
 - Odoo journal (existing or create new, scoped to selected company)
+- Profile name is always set to the selected Odoo journal name
 - Network (all `viem/chains` options)
-- RPC provider (public or Alchemy API key)
+- Alchemy API key (optional; if empty, public RPC is used)
 - ERC-20 token address (USDC/EURC suggestions + custom input)
 - Wallet address filter (required)
 

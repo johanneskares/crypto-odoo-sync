@@ -17,7 +17,6 @@ import {
   getExplorerTxUrl,
   getNetworkDisplayName,
   getTokenSuggestions,
-  type RpcProvider,
 } from "./constants";
 import { RpcService, type TransferRecord } from "./erc20";
 import {
@@ -149,40 +148,58 @@ const toShortCode = (name: string): string => {
   return `${alpha}JNL`.slice(0, 5);
 };
 
-const pickNetwork = (preferredNetwork?: string) => {
-  const ordered = [...CHAIN_OPTIONS].sort((a, b) => {
-    const aPreferred = preferredNetwork != null && a.key === preferredNetwork;
-    const bPreferred = preferredNetwork != null && b.key === preferredNetwork;
-    if (aPreferred && !bPreferred) {
-      return -1;
+const normalizeSearchQuery = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+const matchesNetworkSearch = (network: (typeof CHAIN_OPTIONS)[number], normalizedQuery: string): boolean => {
+  if (normalizedQuery.length === 0) {
+    return true;
+  }
+
+  const searchable = `${network.name} ${network.key} ${network.chainId}`.toLowerCase();
+  return normalizedQuery.split(" ").every((term) => searchable.includes(term));
+};
+
+const pickNetwork = (preferredNetwork?: string) =>
+  Effect.gen(function* () {
+    const ordered = [...CHAIN_OPTIONS].sort((a, b) => {
+      const aPreferred = preferredNetwork != null && a.key === preferredNetwork;
+      const bPreferred = preferredNetwork != null && b.key === preferredNetwork;
+      if (aPreferred && !bPreferred) {
+        return -1;
+      }
+      if (!aPreferred && bPreferred) {
+        return 1;
+      }
+      return a.title.localeCompare(b.title);
+    });
+
+    let searchQuery = yield* promptText(
+      "Search blockchain network (name, key, or chain id). Leave empty to show all.",
+      ""
+    ).pipe(Effect.map(normalizeSearchQuery));
+
+    while (true) {
+      const matched = ordered.filter((network) => matchesNetworkSearch(network, searchQuery));
+      if (matched.length > 0) {
+        const message =
+          searchQuery.length > 0 ? `Choose blockchain network (filtered: ${searchQuery})` : "Choose blockchain network";
+        return yield* promptSelect(
+          message,
+          matched.map((network) => ({ title: network.title, value: network.key }))
+        );
+      }
+
+      yield* Console.log(`No blockchain networks match "${searchQuery}".`);
+      searchQuery = yield* promptText(
+        "Search blockchain network (name, key, or chain id). Leave empty to show all.",
+        searchQuery
+      ).pipe(Effect.map(normalizeSearchQuery));
     }
-    if (!aPreferred && bPreferred) {
-      return 1;
-    }
-    return a.title.localeCompare(b.title);
   });
-
-  return promptSelect(
-    "Choose blockchain network",
-    ordered.map((network) => ({ title: network.title, value: network.key }))
-  );
-};
-
-const pickRpcProvider = (existing?: RpcProvider) => {
-  const publicOption = {
-    title: "Public RPC (default)",
-    value: "public" as const,
-    description: "Uses chain default RPC endpoint (no API key).",
-  };
-  const alchemyOption = {
-    title: "Alchemy API key",
-    value: "alchemy" as const,
-    description: "Uses https://<chainId>.g.alchemy.com/v2/<key>.",
-  };
-
-  const choices = existing === "alchemy" ? [alchemyOption, publicOption] : [publicOption, alchemyOption];
-  return promptSelect("RPC provider", choices);
-};
 
 const pickTokenAddress = (network: string, existingTokenAddress?: Address, existingTokenSymbol?: string) =>
   Effect.gen(function* () {
@@ -243,31 +260,8 @@ const pickTokenAddress = (network: string, existingTokenAddress?: Address, exist
     };
   });
 
-const promptProfileName = (
-  profiles: readonly NamedAppConfig[],
-  defaultValue: string,
-  currentName?: string
-) =>
-  Prompt.run(
-    Prompt.text({
-      message: "Config profile name",
-      default: defaultValue,
-      validate: (value) => {
-        const name = value.trim();
-        if (name.length === 0) {
-          return Effect.fail("Config profile name is required.");
-        }
-        const duplicate = profiles.some((profile) => profile.name === name && profile.name !== currentName);
-        return duplicate ? Effect.fail(`Config profile "${name}" already exists.`) : Effect.succeed(value);
-      },
-    })
-  ).pipe(Effect.map((value) => value.trim()));
-
 const configureProfile = (existingProfile: NamedAppConfig | undefined, allProfiles: readonly NamedAppConfig[]) =>
   Effect.gen(function* () {
-    const defaultName = existingProfile?.name ?? `config-${allProfiles.length + 1}`;
-    const profileName = yield* promptProfileName(allProfiles, defaultName, existingProfile?.name);
-
     const odooUrl = yield* promptRequired("Odoo URL", existingProfile?.odooUrl ?? process.env.ODOO_URL ?? "");
     const odooApiKey = yield* promptRequired(
       "Odoo API Key",
@@ -367,12 +361,30 @@ const configureProfile = (existingProfile: NamedAppConfig | undefined, allProfil
       yield* Console.log(`Created journal ${createdJournal.name} (id=${createdJournal.id}).`);
     }
 
+    const profileName = journalName.trim();
+    if (profileName.length === 0) {
+      return yield* Effect.fail(new Error("Selected Odoo journal has an empty name. Set a journal name in Odoo first."));
+    }
+
+    const duplicateProfile = allProfiles.find(
+      (profile) => profile.name === profileName && profile.name !== existingProfile?.name
+    );
+    if (duplicateProfile) {
+      return yield* Effect.fail(
+        new Error(
+          `A config profile named "${profileName}" already exists. Rename the Odoo journal or remove the existing profile first.`
+        )
+      );
+    }
+
     const network = yield* pickNetwork(existingProfile?.network);
-    const rpcProvider = yield* pickRpcProvider(existingProfile?.rpcProvider);
-    const alchemyApiKey =
-      rpcProvider === "alchemy"
-        ? yield* promptRequired("Alchemy API Key", existingProfile?.alchemyApiKey ?? process.env.ALCHEMY_API_KEY ?? "")
-        : undefined;
+    const alchemyApiKey = yield* promptText(
+      "Alchemy API Key (optional, leave empty to use public RPC)",
+      existingProfile?.alchemyApiKey ?? process.env.ALCHEMY_API_KEY ?? ""
+    ).pipe(
+      Effect.map((value) => value.trim()),
+      Effect.map((value) => (value.length > 0 ? value : undefined))
+    );
     const token = yield* pickTokenAddress(network, existingProfile?.tokenAddress, existingProfile?.tokenSymbol);
 
     const walletAddress = yield* promptRequired(
@@ -392,7 +404,6 @@ const configureProfile = (existingProfile: NamedAppConfig | undefined, allProfil
       tokenAddress: token.tokenAddress,
       tokenSymbol: token.tokenSymbol,
       walletAddress,
-      rpcProvider,
       alchemyApiKey,
     } satisfies NamedAppConfig;
   });
@@ -468,9 +479,10 @@ const setupProgram = Effect.gen(function* () {
   yield* Console.log(
     `Network: ${getNetworkDisplayName(configuredProfile.network)} (${configuredProfile.network})`
   );
-  yield* Console.log(`RPC provider: ${configuredProfile.rpcProvider}`);
-  if (configuredProfile.rpcProvider === "alchemy") {
-    yield* Console.log(`Alchemy API Key: ${configuredProfile.alchemyApiKey ? "configured" : "missing"}`);
+  const rpcMode = configuredProfile.alchemyApiKey ? "alchemy" : "public";
+  yield* Console.log(`RPC mode: ${rpcMode}`);
+  if (configuredProfile.alchemyApiKey) {
+    yield* Console.log("Alchemy API Key: configured");
   }
   yield* Console.log(`Token: ${configuredProfile.tokenAddress}`);
   yield* Console.log(`Wallet filter: ${configuredProfile.walletAddress}`);
@@ -524,22 +536,21 @@ const syncProgram = (options: { verbose: boolean }) => {
 
     const fromDate = yield* promptIsoDate("From date (YYYY-MM-DD)", defaultFromDate());
     const toDate = yield* promptIsoDate("To date (YYYY-MM-DD)", todayIso());
-    const rpcProvider = config.rpcProvider ?? (process.env.ALCHEMY_API_KEY ? "alchemy" : "public");
-    const alchemyApiKey = config.alchemyApiKey ?? process.env.ALCHEMY_API_KEY;
+    const alchemyApiKey = (config.alchemyApiKey ?? process.env.ALCHEMY_API_KEY)?.trim() || undefined;
+    const rpcMode = alchemyApiKey ? "alchemy" : "public";
 
     const startedAt = Date.now();
     const elapsed = () => `${((Date.now() - startedAt) / 1_000).toFixed(1)}s`;
 
     yield* Effect.logInfo("Reading ERC-20 transfer logs...");
     yield* Effect.logDebug(
-      `Sync config: profile=${config.name}, network=${config.network}, token=${config.tokenAddress}, wallet=${walletAddress}, range=${fromDate}..${toDate}, rpcProvider=${rpcProvider}`
+      `Sync config: profile=${config.name}, network=${config.network}, token=${config.tokenAddress}, wallet=${walletAddress}, range=${fromDate}..${toDate}, rpcMode=${rpcMode}`
     );
 
     const transfers = yield* RpcService.getTransferRecords({
       alchemyApiKey,
       fromDate,
       network: config.network,
-      rpcProvider,
       toDate,
       tokenAddress: config.tokenAddress,
       walletAddress,

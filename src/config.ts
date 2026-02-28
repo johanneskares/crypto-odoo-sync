@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { Address } from "viem";
 import { isAddress } from "viem";
-import { resolveChainOption, type RpcProvider } from "./constants";
+import { resolveChainOption } from "./constants";
 
 export const CONFIG_FILE_NAME = ".erc20-odoo-sync.config.json";
 
@@ -30,9 +30,7 @@ const AppConfigFields = {
   network: NetworkSchema,
   tokenAddress: AddressSchema,
   tokenSymbol: Schema.optional(Schema.String),
-  tokenDecimals: Schema.optional(Schema.Number.pipe(Schema.int())),
   walletAddress: Schema.optional(AddressSchema),
-  rpcProvider: Schema.optional(Schema.Literal("public", "alchemy")),
   alchemyApiKey: Schema.optional(Schema.String),
 };
 
@@ -51,7 +49,6 @@ const AppConfigStoreJsonSchema = Schema.parseJson(AppConfigStoreDocumentSchema);
 export type AppConfig = Schema.Schema.Type<typeof AppConfigDocumentSchema>;
 export type NamedAppConfig = Schema.Schema.Type<typeof NamedAppConfigDocumentSchema>;
 export type AppConfigStore = Schema.Schema.Type<typeof AppConfigStoreDocumentSchema>;
-export type AppRpcProvider = RpcProvider;
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
   message: string;

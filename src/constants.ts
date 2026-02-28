@@ -141,8 +141,6 @@ export const getTokenSuggestions = (network: string): readonly TokenSuggestion[]
 export const getNetworkDisplayName = (network: string): string =>
   resolveChainOption(network)?.chain.name ?? network;
 
-export type RpcProvider = "public" | "alchemy";
-
 export const supportsAlchemyNetwork = (network: string): boolean => {
   return resolveChainOption(network) != null;
 };

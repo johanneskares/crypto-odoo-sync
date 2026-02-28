@@ -10,7 +10,7 @@ import {
   type Hash,
 } from "viem";
 
-import { resolveAlchemyRpcUrl, resolveChainOption, type RpcProvider } from "./constants";
+import { resolveAlchemyRpcUrl, resolveChainOption } from "./constants";
 
 const transferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 
@@ -22,6 +22,7 @@ const RPC_RETRY_DELAY = "200 millis";
 const RPC_RETRY_TIMES = 2;
 
 type AnyPublicClient = ReturnType<typeof createPublicClient>;
+type RpcMode = "public" | "alchemy";
 interface Erc20ReadClient {
   readContract: (parameters: {
     abi: typeof erc20Abi;
@@ -109,9 +110,8 @@ const parseUtcDate = (date: string, endOfDay = false): Effect.Effect<number, Cha
 
 const makeClient = (
   network: string,
-  rpcProvider: RpcProvider,
   alchemyApiKey?: string
-): Effect.Effect<{ client: AnyPublicClient; networkKey: string; rpcUrl: string; rpcMode: RpcProvider }, ChainError> =>
+): Effect.Effect<{ client: AnyPublicClient; networkKey: string; rpcUrl: string; rpcMode: RpcMode }, ChainError> =>
   Effect.sync(() => {
     const chainOption = resolveChainOption(network);
     if (!chainOption) {
@@ -120,20 +120,11 @@ const makeClient = (
       });
     }
 
-    let rpcUrl: string | undefined;
-    let rpcMode: RpcProvider = rpcProvider;
-
-    if (rpcProvider === "alchemy") {
-      const alchemyUrl = resolveAlchemyRpcUrl(network, alchemyApiKey ?? "");
-      if (!alchemyUrl) {
-        throw new ChainError({
-          message: "Alchemy is selected but no valid Alchemy API key is configured.",
-        });
-      }
-      rpcUrl = alchemyUrl;
-    } else {
-      rpcUrl = chainOption.chain.rpcUrls.default.http[0];
-    }
+    const normalizedAlchemyApiKey = alchemyApiKey?.trim() ?? "";
+    const alchemyUrl =
+      normalizedAlchemyApiKey.length > 0 ? resolveAlchemyRpcUrl(network, normalizedAlchemyApiKey) : undefined;
+    const rpcMode: RpcMode = alchemyUrl ? "alchemy" : "public";
+    const rpcUrl = alchemyUrl ?? chainOption.chain.rpcUrls.default.http[0];
 
     if (!rpcUrl) {
       throw new ChainError({
@@ -366,7 +357,6 @@ export const getTransferRecords = (params: {
   fromDate: string;
   toDate: string;
   walletAddress: Address;
-  rpcProvider?: RpcProvider;
   alchemyApiKey?: string;
 }): Effect.Effect<readonly TransferRecord[], ChainError> =>
   Effect.gen(function* () {
@@ -381,11 +371,7 @@ export const getTransferRecords = (params: {
       );
     }
 
-    const { client, networkKey, rpcUrl, rpcMode } = yield* makeClient(
-      params.network,
-      params.rpcProvider ?? "public",
-      params.alchemyApiKey
-    );
+    const { client, networkKey, rpcUrl, rpcMode } = yield* makeClient(params.network, params.alchemyApiKey);
     yield* Effect.logDebug(`RPC client ready for network=${networkKey}, mode=${rpcMode}, endpoint=${rpcUrl}`);
 
     yield* Effect.logDebug("Loading latest block...");
