@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.2.1...v1.3.0) (2026-02-28)
+
+
+### Features
+
+* use alchemy_getAssetTransfers and clean sync logging ([53806db](https://github.com/johanneskares/crypto-odoo-sync/commit/53806dbd039224e53d8a33708694207c88c4bc21))
+
 ## [1.2.1](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.2.0...v1.2.1) (2026-02-28)
 
 # [1.2.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.1.0...v1.2.0) (2026-02-28)
