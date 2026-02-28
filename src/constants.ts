@@ -50,6 +50,14 @@ for (const entry of RAW_CHAINS) {
 
 const normalizeNetworkKey = (network: string): string => CHAIN_ALIASES.get(network) ?? network;
 
+const ALCHEMY_HOST_BY_CHAIN_KEY = new Map<string, string>([
+  ["mainnet", "eth-mainnet"],
+  ["base", "base-mainnet"],
+  ["arbitrum", "arb-mainnet"],
+  ["optimism", "opt-mainnet"],
+  ["polygon", "polygon-mainnet"],
+]);
+
 export const resolveChainOption = (network: string): SelectableChain | undefined => {
   const normalized = normalizeNetworkKey(network.trim());
   return CHAINS_BY_KEY.get(normalized);
@@ -104,9 +112,19 @@ const TOKEN_SUGGESTIONS: readonly TokenSuggestion[] = [
     address: "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
   },
   {
+    symbol: "USDT",
+    networkKey: "base",
+    address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+  },
+  {
     symbol: "USDC",
     networkKey: "mainnet",
     address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+  },
+  {
+    symbol: "USDT",
+    networkKey: "mainnet",
+    address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
   },
   {
     symbol: "EURC",
@@ -121,14 +139,9 @@ const tokenDedupKey = (suggestion: TokenSuggestion): string =>
 export const getTokenSuggestions = (network: string): readonly TokenSuggestion[] => {
   const normalized = normalizeNetworkKey(network);
 
-  const preferred = TOKEN_SUGGESTIONS.filter(
+  const ordered = TOKEN_SUGGESTIONS.filter(
     (suggestion) => normalizeNetworkKey(suggestion.networkKey) === normalized
   );
-  const others = TOKEN_SUGGESTIONS.filter(
-    (suggestion) => normalizeNetworkKey(suggestion.networkKey) !== normalized
-  );
-
-  const ordered = [...preferred, ...others];
   const deduped = new Map<string, TokenSuggestion>();
 
   for (const suggestion of ordered) {
@@ -142,19 +155,29 @@ export const getNetworkDisplayName = (network: string): string =>
   resolveChainOption(network)?.chain.name ?? network;
 
 export const supportsAlchemyNetwork = (network: string): boolean => {
-  return resolveChainOption(network) != null;
+  const chainKey = resolveChainOption(network)?.key;
+  return chainKey != null && ALCHEMY_HOST_BY_CHAIN_KEY.has(chainKey);
 };
 
 export const resolveAlchemyRpcUrl = (network: string, apiKey: string): string | undefined => {
-  const chain = resolveChainOption(network)?.chain;
-  if (!chain) {
-    return undefined;
-  }
-
   const normalizedKey = apiKey.trim();
   if (normalizedKey.length === 0) {
     return undefined;
   }
 
-  return `https://${chain.id}.g.alchemy.com/v2/${normalizedKey}`;
+  if (/^https?:\/\//i.test(normalizedKey)) {
+    return normalizedKey.replace(/\/+$/, "");
+  }
+
+  const chainKey = resolveChainOption(network)?.key;
+  if (!chainKey) {
+    return undefined;
+  }
+
+  const alchemyHost = ALCHEMY_HOST_BY_CHAIN_KEY.get(chainKey);
+  if (!alchemyHost) {
+    return undefined;
+  }
+
+  return `https://${alchemyHost}.g.alchemy.com/v2/${normalizedKey}`;
 };

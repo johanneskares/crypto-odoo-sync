@@ -5,24 +5,20 @@ import {
   formatUnits,
   http,
   isAddress,
-  parseAbiItem,
   type Address,
   type Hash,
 } from "viem";
 
 import { resolveAlchemyRpcUrl, resolveChainOption } from "./constants";
 
-const transferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
-
-const CHUNK_SIZE = 10_000n;
-const LOG_PROGRESS_EVERY_CHUNKS = 10;
 const BLOCK_SEARCH_LOG_EVERY_STEPS = 8;
 const RPC_REQUEST_TIMEOUT = "30 seconds";
 const RPC_RETRY_DELAY = "200 millis";
 const RPC_RETRY_TIMES = 2;
+const ALCHEMY_MAX_PAGE_SIZE = "0x3e8";
+const ALCHEMY_TRANSFER_CATEGORY = ["erc20"] as const;
 
 type AnyPublicClient = ReturnType<typeof createPublicClient>;
-type RpcMode = "public" | "alchemy";
 interface Erc20ReadClient {
   readContract: (parameters: {
     abi: typeof erc20Abi;
@@ -30,8 +26,62 @@ interface Erc20ReadClient {
     functionName: "decimals" | "symbol";
   }) => Promise<string | number | bigint>;
 }
+interface RpcRequestClient {
+  request: (parameters: { method: string; params?: readonly unknown[] }) => Promise<unknown>;
+}
+
+interface AlchemyGetAssetTransfersParams {
+  category: typeof ALCHEMY_TRANSFER_CATEGORY;
+  contractAddresses: readonly [Address];
+  excludeZeroValue: boolean;
+  fromAddress?: Address;
+  fromBlock: string;
+  maxCount: string;
+  order: "asc" | "desc";
+  pageKey?: string;
+  toAddress?: Address;
+  toBlock: string;
+  withMetadata: true;
+}
+
+interface AlchemyAssetTransferMetadata {
+  blockTimestamp?: string;
+}
+
+interface AlchemyAssetTransferRawContract {
+  value?: string;
+}
+
+interface AlchemyAssetTransfer {
+  blockNum?: string;
+  from?: string;
+  hash?: string;
+  logIndex?: string | number;
+  metadata?: AlchemyAssetTransferMetadata;
+  rawContract?: AlchemyAssetTransferRawContract;
+  to?: string;
+  uniqueId?: string;
+}
+
+interface AlchemyGetAssetTransfersResponse {
+  pageKey?: string;
+  transfers?: AlchemyAssetTransfer[];
+}
+
+interface ParsedAssetTransfer {
+  blockNumber: bigint;
+  from: Address;
+  logIndex: number;
+  timestamp: number | undefined;
+  to: Address;
+  txHash: Hash;
+  uniqueId: string;
+  value: bigint;
+}
 
 const toErrorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const toHexBlock = (value: bigint): `0x${string}` => `0x${value.toString(16)}`;
+const isHex = (value: string): boolean => /^0x[0-9a-f]+$/i.test(value);
 
 const withRpcTimeoutAndRetry = <A>(
   effect: Effect.Effect<A, ChainError>,
@@ -51,22 +101,16 @@ const withRpcTimeoutAndRetry = <A>(
     })
   );
 
-const queryTransferLogs = (
+const queryAssetTransfers = (
   client: AnyPublicClient,
-  tokenAddress: Address,
-  fromBlock: bigint,
-  toBlock: bigint,
-  args?: { from?: Address; to?: Address }
-) =>
-  client.getLogs({
-    address: tokenAddress,
-    event: transferEvent,
-    ...(args ? { args } : {}),
-    fromBlock,
-    toBlock,
-    strict: true,
-  });
-type TransferLog = Awaited<ReturnType<typeof queryTransferLogs>>[number];
+  params: AlchemyGetAssetTransfersParams
+): Promise<AlchemyGetAssetTransfersResponse> =>
+  (client as RpcRequestClient)
+    .request({
+      method: "alchemy_getAssetTransfers",
+      params: [params],
+    })
+    .then((response) => response as AlchemyGetAssetTransfersResponse);
 
 export class ChainError extends Data.TaggedError("ChainError")<{
   message: string;
@@ -110,8 +154,8 @@ const parseUtcDate = (date: string, endOfDay = false): Effect.Effect<number, Cha
 
 const makeClient = (
   network: string,
-  alchemyApiKey?: string
-): Effect.Effect<{ client: AnyPublicClient; networkKey: string; rpcUrl: string; rpcMode: RpcMode }, ChainError> =>
+  alchemyApiKey: string
+): Effect.Effect<{ chainId: number; client: AnyPublicClient; networkKey: string; rpcUrl: string }, ChainError> =>
   Effect.sync(() => {
     const chainOption = resolveChainOption(network);
     if (!chainOption) {
@@ -120,26 +164,28 @@ const makeClient = (
       });
     }
 
-    const normalizedAlchemyApiKey = alchemyApiKey?.trim() ?? "";
-    const alchemyUrl =
-      normalizedAlchemyApiKey.length > 0 ? resolveAlchemyRpcUrl(network, normalizedAlchemyApiKey) : undefined;
-    const rpcMode: RpcMode = alchemyUrl ? "alchemy" : "public";
-    const rpcUrl = alchemyUrl ?? chainOption.chain.rpcUrls.default.http[0];
+    const normalizedAlchemyApiKey = alchemyApiKey.trim();
+    if (normalizedAlchemyApiKey.length === 0) {
+      throw new ChainError({
+        message: "Alchemy API key is required.",
+      });
+    }
+    const rpcUrl = resolveAlchemyRpcUrl(network, normalizedAlchemyApiKey);
 
     if (!rpcUrl) {
       throw new ChainError({
-        message: `No RPC URL available for network \"${network}\".`,
+        message: `No Alchemy RPC URL available for network \"${network}\".`,
       });
     }
 
     return {
+      chainId: chainOption.chain.id,
       client: createPublicClient({
         chain: chainOption.chain,
         transport: http(rpcUrl),
       }),
       networkKey: chainOption.key,
       rpcUrl,
-      rpcMode,
     };
   });
 
@@ -264,46 +310,59 @@ const fetchTransfers = (
   toBlock: bigint,
   args?: { from?: Address; to?: Address },
   label = "transfers"
-): Effect.Effect<TransferLog[], ChainError> =>
+): Effect.Effect<AlchemyAssetTransfer[], ChainError> =>
   Effect.gen(function* () {
-    const logs: TransferLog[] = [];
-
     if (fromBlock > toBlock) {
-      return logs;
+      return [] as AlchemyAssetTransfer[];
     }
 
-    const totalChunks = Number((toBlock - fromBlock) / CHUNK_SIZE + 1n);
-    let chunkIndex = 0;
-    let current = fromBlock;
-    while (current <= toBlock) {
-      const end = current + CHUNK_SIZE > toBlock ? toBlock : current + CHUNK_SIZE;
-      chunkIndex += 1;
-      if (
-        chunkIndex === 1 ||
-        chunkIndex === totalChunks ||
-        chunkIndex % LOG_PROGRESS_EVERY_CHUNKS === 0
-      ) {
-        yield* Effect.logDebug(`Fetching ${label}: chunk ${chunkIndex}/${totalChunks} (blocks ${current}-${end})`);
-      }
+    const requestBase = {
+      category: ALCHEMY_TRANSFER_CATEGORY,
+      contractAddresses: [tokenAddress] as const,
+      excludeZeroValue: false,
+      fromBlock: toHexBlock(fromBlock),
+      maxCount: ALCHEMY_MAX_PAGE_SIZE,
+      order: "asc" as const,
+      toBlock: toHexBlock(toBlock),
+      withMetadata: true as const,
+      ...(args?.from ? { fromAddress: args.from } : {}),
+      ...(args?.to ? { toAddress: args.to } : {}),
+    } satisfies Omit<AlchemyGetAssetTransfersParams, "pageKey">;
 
-      const chunk = yield* withRpcTimeoutAndRetry(
-        Effect.promise(() => queryTransferLogs(client, tokenAddress, current, end, args)).pipe(
+    let pageKey: string | undefined;
+    let page = 0;
+    const transfers: AlchemyAssetTransfer[] = [];
+
+    while (true) {
+      page += 1;
+      yield* Effect.logDebug(
+        `Fetching ${label} via alchemy_getAssetTransfers: blocks ${fromBlock}-${toBlock}, page=${page}${pageKey ? `, pageKey=${pageKey}` : ""}`
+      );
+
+      const response = yield* withRpcTimeoutAndRetry(
+        Effect.promise(() => queryAssetTransfers(client, { ...requestBase, ...(pageKey ? { pageKey } : {}) })).pipe(
           Effect.catchAllDefect((error) =>
             Effect.fail(
               new ChainError({
-                message: `Failed to query transfer logs ${current}-${end}: ${toErrorMessage(error)}`,
+                message: `Failed to query ${label} transfers ${fromBlock}-${toBlock}: ${toErrorMessage(error)}`,
               })
             )
           )
         ),
-        `Timed out querying ${label} for block range ${current}-${end}`
+        `Timed out querying ${label} transfers from Alchemy for block range ${fromBlock}-${toBlock}`
       );
 
-      logs.push(...chunk);
-      current = end + 1n;
+      const pageTransfers = Array.isArray(response.transfers) ? response.transfers : [];
+      transfers.push(...pageTransfers);
+
+      const nextPageKey = response.pageKey?.trim();
+      if (!nextPageKey) {
+        break;
+      }
+      pageKey = nextPageKey;
     }
 
-    return logs;
+    return transfers;
   });
 
 const fetchWalletTransfers = (
@@ -312,7 +371,7 @@ const fetchWalletTransfers = (
   wallet: Address,
   fromBlock: bigint,
   toBlock: bigint
-): Effect.Effect<TransferLog[], ChainError> =>
+): Effect.Effect<AlchemyAssetTransfer[], ChainError> =>
   Effect.gen(function* () {
     yield* Effect.logDebug("Scanning incoming transfer logs...");
     const incoming = yield* fetchTransfers(client, tokenAddress, fromBlock, toBlock, { to: wallet }, "incoming");
@@ -320,9 +379,13 @@ const fetchWalletTransfers = (
     yield* Effect.logDebug("Scanning outgoing transfer logs...");
     const outgoing = yield* fetchTransfers(client, tokenAddress, fromBlock, toBlock, { from: wallet }, "outgoing");
 
-    const deduped = new Map<string, TransferLog>();
+    const deduped = new Map<string, AlchemyAssetTransfer>();
     for (const entry of [...incoming, ...outgoing]) {
-      deduped.set(`${entry.transactionHash}-${entry.logIndex}`, entry);
+      const txHash = (entry.hash ?? "").toLowerCase();
+      const uniqueId = entry.uniqueId?.toLowerCase();
+      const logIndexFromUniqueId = uniqueId?.split(":").at(-1);
+      const logIndex = entry.logIndex ?? logIndexFromUniqueId;
+      deduped.set(`${txHash}-${String(logIndex ?? uniqueId ?? "unknown")}`, entry);
     }
 
     return [...deduped.values()];
@@ -357,7 +420,7 @@ export const getTransferRecords = (params: {
   fromDate: string;
   toDate: string;
   walletAddress: Address;
-  alchemyApiKey?: string;
+  alchemyApiKey: string;
 }): Effect.Effect<readonly TransferRecord[], ChainError> =>
   Effect.gen(function* () {
     const fromTimestamp = yield* parseUtcDate(params.fromDate, false);
@@ -371,11 +434,12 @@ export const getTransferRecords = (params: {
       );
     }
 
-    const { client, networkKey, rpcUrl, rpcMode } = yield* makeClient(params.network, params.alchemyApiKey);
-    yield* Effect.logDebug(`RPC client ready for network=${networkKey}, mode=${rpcMode}, endpoint=${rpcUrl}`);
+    const { chainId, client, networkKey, rpcUrl } = yield* makeClient(params.network, params.alchemyApiKey);
+    yield* Effect.logDebug(`RPC client ready for network=${networkKey}, mode=alchemy, endpoint=${rpcUrl}`);
 
     yield* Effect.logDebug("Loading latest block...");
     const latestBlock = yield* fetchLatestBlock(client);
+
     yield* Effect.logDebug(
       `Latest block=${latestBlock.number} timestamp=${latestBlock.timestamp} (${new Date(latestBlock.timestamp * 1_000).toISOString()})`
     );
@@ -392,10 +456,7 @@ export const getTransferRecords = (params: {
       return [];
     }
 
-    const estimatedChunksPerDirection = Number((toBlock - fromBlock) / CHUNK_SIZE + 1n);
-    yield* Effect.logDebug(
-      `Resolved block range ${fromBlock}-${toBlock} (~${estimatedChunksPerDirection} chunks per direction)`
-    );
+    yield* Effect.logDebug(`Resolved block range ${fromBlock}-${toBlock}`);
 
     yield* Effect.logDebug(`Loading token metadata for ${params.tokenAddress}...`);
     const tokenMeta = yield* fetchTokenMeta(client, params.tokenAddress);
@@ -413,51 +474,133 @@ export const getTransferRecords = (params: {
       return [];
     }
 
-    const uniqueBlocks = [...new Set(rawLogs.map((entry) => String(entry.blockNumber)))].map((value) => BigInt(value));
-    yield* Effect.logDebug(`Resolving timestamps for ${uniqueBlocks.length} unique block(s)...`);
-    const timestamps = yield* resolveBlockTimestamps(client, uniqueBlocks);
+    const parseLogIndex = (entry: AlchemyAssetTransfer, fallback: number): number => {
+      const fromLogIndex = entry.logIndex;
+      if (typeof fromLogIndex === "number" && Number.isInteger(fromLogIndex)) {
+        return fromLogIndex;
+      }
+      if (typeof fromLogIndex === "string" && fromLogIndex.trim().length > 0) {
+        const normalized = fromLogIndex.trim();
+        const parsed = isHex(normalized)
+          ? Number.parseInt(normalized.slice(2), 16)
+          : Number.parseInt(normalized, 10);
+        if (!Number.isNaN(parsed)) {
+          return parsed;
+        }
+      }
+
+      const fromUniqueId = entry.uniqueId?.split(":").at(-1)?.trim();
+      if (fromUniqueId && fromUniqueId.length > 0) {
+        const parsed = isHex(fromUniqueId)
+          ? Number.parseInt(fromUniqueId.slice(2), 16)
+          : Number.parseInt(fromUniqueId, 10);
+        if (!Number.isNaN(parsed)) {
+          return parsed;
+        }
+      }
+
+      return fallback;
+    };
+
+    const parseTimestamp = (entry: AlchemyAssetTransfer): number | undefined => {
+      const blockTimestamp = entry.metadata?.blockTimestamp;
+      if (!blockTimestamp || blockTimestamp.trim().length === 0) {
+        return undefined;
+      }
+      const parsed = Date.parse(blockTimestamp);
+      if (Number.isNaN(parsed)) {
+        return undefined;
+      }
+      return Math.floor(parsed / 1_000);
+    };
+
+    const parsedTransfers = rawLogs
+      .map((entry, index) => {
+        if (!entry.blockNum || !entry.hash || !entry.from || !entry.to || !entry.rawContract?.value) {
+          return undefined;
+        }
+        if (!isAddress(entry.from) || !isAddress(entry.to)) {
+          return undefined;
+        }
+
+        let blockNumber: bigint;
+        try {
+          blockNumber = BigInt(entry.blockNum);
+        } catch {
+          return undefined;
+        }
+
+        let value: bigint;
+        try {
+          value = BigInt(entry.rawContract.value);
+        } catch {
+          return undefined;
+        }
+
+        const txHash = entry.hash as Hash;
+        const logIndex = parseLogIndex(entry, index);
+        const rawUniqueId = entry.uniqueId?.trim();
+        const uniqueId = rawUniqueId && rawUniqueId.length > 0 ? rawUniqueId : `${entry.hash}:${logIndex}`;
+
+        return {
+          blockNumber,
+          from: entry.from,
+          logIndex,
+          timestamp: parseTimestamp(entry),
+          to: entry.to,
+          txHash,
+          uniqueId,
+          value,
+        } satisfies ParsedAssetTransfer;
+      })
+      .filter((entry): entry is ParsedAssetTransfer => entry !== undefined);
+
+    const missingTimestampBlockValues = [...new Set(
+      parsedTransfers.filter((entry) => entry.timestamp == null).map((entry) => entry.blockNumber.toString())
+    )].map((value) => BigInt(value));
+
+    yield* Effect.logDebug(
+      `Resolving timestamps for ${missingTimestampBlockValues.length} block(s) missing metadata timestamp...`
+    );
+
+    const timestamps = yield* resolveBlockTimestamps(client, missingTimestampBlockValues);
     const timestampByBlock = new Map(timestamps.map((entry) => [entry.blockNumber.toString(), entry.timestamp]));
 
     const walletLower = params.walletAddress.toLowerCase();
 
-    const mapped = rawLogs
+    const mapped = parsedTransfers
       .map((entry) => {
-        const blockTimestamp = timestampByBlock.get(entry.blockNumber.toString());
-        if (blockTimestamp === undefined || entry.logIndex == null || entry.transactionHash == null) {
+        const blockTimestamp = entry.timestamp ?? timestampByBlock.get(entry.blockNumber.toString());
+        if (blockTimestamp === undefined) {
           return undefined;
         }
 
-        const from = entry.args.from;
-        const to = entry.args.to;
-        const value = entry.args.value;
-
-        if (!from || !to || value === undefined) {
-          return undefined;
-        }
-
-        const unsignedAmount = Number(formatUnits(value, tokenMeta.decimals));
-        const signedAmount = to.toLowerCase() === walletLower ? unsignedAmount : -unsignedAmount;
+        const unsignedAmount = Number(formatUnits(entry.value, tokenMeta.decimals));
+        const signedAmount = entry.to.toLowerCase() === walletLower ? unsignedAmount : -unsignedAmount;
 
         return {
           amount: signedAmount,
-          amountRaw: value.toString(),
+          amountRaw: entry.value.toString(),
           blockNumber: entry.blockNumber,
           date: new Date(blockTimestamp * 1_000).toISOString().slice(0, 10),
-          from,
+          from: entry.from,
           logIndex: entry.logIndex,
           network: networkKey,
           timestamp: blockTimestamp,
-          to,
+          to: entry.to,
           tokenAddress: params.tokenAddress,
           tokenSymbol: tokenMeta.symbol,
-          txHash: entry.transactionHash,
-          uniqueId: `${networkKey}-${entry.transactionHash}-${entry.logIndex}`,
+          txHash: entry.txHash,
+          uniqueId: `${chainId}-${entry.txHash}-${entry.logIndex}`,
         } satisfies TransferRecord;
       })
       .filter((entry): entry is TransferRecord => entry !== undefined)
       .sort((a, b) => {
         if (a.timestamp === b.timestamp) {
-          return a.logIndex - b.logIndex;
+          if (a.blockNumber === b.blockNumber) {
+            return a.logIndex - b.logIndex;
+          }
+          return a.blockNumber < b.blockNumber ? -1 : 1;
         }
         return a.timestamp - b.timestamp;
       });

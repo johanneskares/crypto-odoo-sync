@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { Address } from "viem";
 import { isAddress } from "viem";
-import { resolveChainOption } from "./constants";
+import { supportsAlchemyNetwork } from "./constants";
 
 export const CONFIG_FILE_NAME = ".erc20-odoo-sync.config.json";
 
@@ -15,8 +15,13 @@ const AddressSchema = Schema.String.pipe(
   })
 );
 const NetworkSchema = Schema.String.pipe(
-  Schema.filter((network) => resolveChainOption(network) != null, {
-    message: () => "Expected a valid viem chain key",
+  Schema.filter((network) => supportsAlchemyNetwork(network), {
+    message: () => "Expected an Alchemy-supported chain key",
+  })
+);
+const AlchemyApiKeySchema = Schema.String.pipe(
+  Schema.filter((value) => value.trim().length > 0, {
+    message: () => "Expected a non-empty Alchemy API key",
   })
 );
 
@@ -31,17 +36,17 @@ const AppConfigFields = {
   tokenAddress: AddressSchema,
   tokenSymbol: Schema.optional(Schema.String),
   walletAddress: Schema.optional(AddressSchema),
-  alchemyApiKey: Schema.optional(Schema.String),
+  alchemyApiKey: AlchemyApiKeySchema,
 };
 
 const AppConfigDocumentSchema = Schema.Struct(AppConfigFields);
 const NamedAppConfigDocumentSchema = Schema.Struct({
-  name: Schema.String,
+  id: Schema.Number.pipe(Schema.int()),
   ...AppConfigFields,
 });
 const AppConfigStoreDocumentSchema = Schema.Struct({
   profiles: Schema.Array(NamedAppConfigDocumentSchema),
-  defaultProfile: Schema.optional(Schema.String),
+  defaultProfileId: Schema.optional(Schema.Number.pipe(Schema.int())),
 });
 
 const AppConfigStoreJsonSchema = Schema.parseJson(AppConfigStoreDocumentSchema);
@@ -85,15 +90,15 @@ const toWriteError = (error: ConfigFileError, configPath: string): ConfigError =
 };
 
 const normalizeStore = (store: AppConfigStore): AppConfigStore => {
-  const defaultProfile = store.defaultProfile;
-  if (defaultProfile && store.profiles.some((profile) => profile.name === defaultProfile)) {
+  const defaultProfileId = store.defaultProfileId;
+  if (defaultProfileId != null && store.profiles.some((profile) => profile.id === defaultProfileId)) {
     return store;
   }
 
-  const nextDefaultProfile = store.profiles[0]?.name;
+  const nextDefaultProfileId = store.profiles[0]?.id;
   return {
     profiles: store.profiles,
-    ...(nextDefaultProfile ? { defaultProfile: nextDefaultProfile } : {}),
+    ...(nextDefaultProfileId != null ? { defaultProfileId: nextDefaultProfileId } : {}),
   };
 };
 

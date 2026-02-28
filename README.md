@@ -64,9 +64,9 @@ When creating/editing a profile, it asks for:
 - Odoo API key
 - Odoo company (selected first)
 - Odoo journal (existing or create new, scoped to selected company)
-- Profile name is always set to the selected Odoo journal name
-- Network (all `viem/chains` options)
-- Alchemy API key (optional; if empty, public RPC is used)
+- Profile ID is assigned automatically; profile display uses the selected Odoo journal name
+- Network (Alchemy-supported chains only)
+- Alchemy API key (required)
 - ERC-20 token address (USDC/EURC suggestions + custom input)
 - Wallet address filter (required)
 
@@ -83,7 +83,7 @@ Prompts for:
 - `to` date (`YYYY-MM-DD`)
 
 Then it:
-- reads ERC-20 `Transfer` logs
+- reads ERC-20 transfers via Alchemy `alchemy_getAssetTransfers`
 - converts them to Odoo statement lines
 - de-duplicates by `unique_import_id`
 - creates new lines in Odoo
@@ -101,6 +101,7 @@ bun run start -- --help
 ## Tips
 
 - Each profile ingests transfers for exactly one configured wallet address.
+- ERC-20 transfer queries use Alchemy `alchemy_getAssetTransfers`.
 - Release binaries are built with Bun baseline targets for broader CPU compatibility.
 - Use `bun run setup` anytime to add/remove profiles or update existing ones.
 - If you used an older single-config file format, run `bun run setup` once to recreate the config file.
