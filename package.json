@@ -10,6 +10,7 @@
     "transfer": "bun src/cli.ts transfer",
     "start": "bun src/cli.ts",
     "build": "tsc -p tsconfig.json",
+    "build:binary": "bun build src/cli.ts --compile --outfile dist/crypto-odoo-sync",
     "release": "semantic-release"
   },
   "dependencies": {

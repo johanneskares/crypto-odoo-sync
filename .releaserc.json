@@ -21,6 +21,12 @@
     [
       "@semantic-release/github",
       {
+        "assets": [
+          {
+            "path": "dist/crypto-odoo-sync",
+            "label": "crypto-odoo-sync (linux binary)"
+          }
+        ],
         "successComment": false,
         "failComment": false
       }
