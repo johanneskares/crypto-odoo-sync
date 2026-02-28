@@ -7,7 +7,6 @@
 	"scripts": {
 		"setup": "bun src/cli.ts setup",
 		"sync": "bun src/cli.ts sync",
-		"transfer": "bun src/cli.ts transfer",
 		"start": "bun src/cli.ts",
 		"build": "tsc -p tsconfig.json",
 		"build:binary:linux": "bun build src/cli.ts --compile --target=bun-linux-x64-baseline --outfile dist/crypto-odoo-sync-linux-x64",

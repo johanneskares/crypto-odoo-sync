@@ -5,9 +5,10 @@ import path from "node:path";
 
 import type { Address } from "viem";
 import { isAddress } from "viem";
-import { resolveChainOption } from "./constants";
+import { resolveChainOption, type RpcProvider } from "./constants";
 
 export const CONFIG_FILE_NAME = ".erc20-odoo-sync.config.json";
+
 const AddressSchema = Schema.String.pipe(
   Schema.filter((value): value is Address => isAddress(value), {
     message: () => "Expected a valid EVM address",
@@ -18,7 +19,8 @@ const NetworkSchema = Schema.String.pipe(
     message: () => "Expected a valid viem chain key",
   })
 );
-const AppConfigDocumentSchema = Schema.Struct({
+
+const AppConfigFields = {
   odooApiKey: Schema.String,
   odooUrl: Schema.String,
   companyId: Schema.optional(Schema.Number.pipe(Schema.int())),
@@ -30,9 +32,26 @@ const AppConfigDocumentSchema = Schema.Struct({
   tokenSymbol: Schema.optional(Schema.String),
   tokenDecimals: Schema.optional(Schema.Number.pipe(Schema.int())),
   walletAddress: Schema.optional(AddressSchema),
+  rpcProvider: Schema.optional(Schema.Literal("public", "alchemy")),
+  alchemyApiKey: Schema.optional(Schema.String),
+};
+
+const AppConfigDocumentSchema = Schema.Struct(AppConfigFields);
+const NamedAppConfigDocumentSchema = Schema.Struct({
+  name: Schema.String,
+  ...AppConfigFields,
 });
-const AppConfigJsonSchema = Schema.parseJson(AppConfigDocumentSchema);
+const AppConfigStoreDocumentSchema = Schema.Struct({
+  profiles: Schema.Array(NamedAppConfigDocumentSchema),
+  defaultProfile: Schema.optional(Schema.String),
+});
+
+const AppConfigStoreJsonSchema = Schema.parseJson(AppConfigStoreDocumentSchema);
+
 export type AppConfig = Schema.Schema.Type<typeof AppConfigDocumentSchema>;
+export type NamedAppConfig = Schema.Schema.Type<typeof NamedAppConfigDocumentSchema>;
+export type AppConfigStore = Schema.Schema.Type<typeof AppConfigStoreDocumentSchema>;
+export type AppRpcProvider = RpcProvider;
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{
   message: string;
@@ -68,8 +87,22 @@ const toWriteError = (error: ConfigFileError, configPath: string): ConfigError =
   });
 };
 
-const decodeConfig = (raw: string, configPath: string): Effect.Effect<AppConfig, ConfigError> =>
-  Schema.decode(AppConfigJsonSchema)(raw).pipe(
+const normalizeStore = (store: AppConfigStore): AppConfigStore => {
+  const defaultProfile = store.defaultProfile;
+  if (defaultProfile && store.profiles.some((profile) => profile.name === defaultProfile)) {
+    return store;
+  }
+
+  const nextDefaultProfile = store.profiles[0]?.name;
+  return {
+    profiles: store.profiles,
+    ...(nextDefaultProfile ? { defaultProfile: nextDefaultProfile } : {}),
+  };
+};
+
+const decodeStore = (raw: string, configPath: string): Effect.Effect<AppConfigStore, ConfigError> =>
+  Schema.decode(AppConfigStoreJsonSchema)(raw).pipe(
+    Effect.map(normalizeStore),
     Effect.mapError(
       (error) =>
         new ConfigError({
@@ -78,8 +111,9 @@ const decodeConfig = (raw: string, configPath: string): Effect.Effect<AppConfig,
     )
   );
 
-const encodeConfig = (config: AppConfig, configPath: string): Effect.Effect<string, ConfigError> =>
-  Schema.encode(AppConfigJsonSchema)(config).pipe(
+const encodeStore = (store: AppConfigStore, configPath: string): Effect.Effect<string, ConfigError> =>
+  Schema.encode(AppConfigStoreDocumentSchema)(normalizeStore(store)).pipe(
+    Effect.map((encoded) => `${JSON.stringify(encoded, null, 2)}\n`),
     Effect.mapError(
       (error) =>
         new ConfigError({
@@ -88,19 +122,18 @@ const encodeConfig = (config: AppConfig, configPath: string): Effect.Effect<stri
     )
   );
 
-export const loadConfig = (configPath = resolveConfigPath()) =>
+const loadStoreRaw = (configPath: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const raw = yield* fs.readFileString(configPath);
-    return yield* decodeConfig(raw, configPath);
-  }).pipe(Effect.mapError((error) => toReadError(error, configPath)));
+    return yield* decodeStore(raw, configPath);
+  });
 
-export const loadConfigOptional = (configPath = resolveConfigPath()) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const raw = yield* fs.readFileString(configPath);
-    return yield* decodeConfig(raw, configPath);
-  }).pipe(
+export const loadConfigStore = (configPath = resolveConfigPath()) =>
+  loadStoreRaw(configPath).pipe(Effect.mapError((error) => toReadError(error, configPath)));
+
+export const loadConfigStoreOptional = (configPath = resolveConfigPath()) =>
+  loadStoreRaw(configPath).pipe(
     Effect.catchAll((error) => {
       if (isNotFoundError(error)) {
         return Effect.succeed(undefined);
@@ -109,10 +142,10 @@ export const loadConfigOptional = (configPath = resolveConfigPath()) =>
     })
   );
 
-export const saveConfig = (config: AppConfig, configPath = resolveConfigPath()) =>
+export const saveConfigStore = (store: AppConfigStore, configPath = resolveConfigPath()) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const serialized = yield* encodeConfig(config, configPath);
+    const serialized = yield* encodeStore(store, configPath);
     yield* fs.writeFileString(configPath, serialized);
     return configPath;
   }).pipe(Effect.mapError((error) => toWriteError(error, configPath)));

@@ -140,3 +140,23 @@ export const getTokenSuggestions = (network: string): readonly TokenSuggestion[]
 
 export const getNetworkDisplayName = (network: string): string =>
   resolveChainOption(network)?.chain.name ?? network;
+
+export type RpcProvider = "public" | "alchemy";
+
+export const supportsAlchemyNetwork = (network: string): boolean => {
+  return resolveChainOption(network) != null;
+};
+
+export const resolveAlchemyRpcUrl = (network: string, apiKey: string): string | undefined => {
+  const chain = resolveChainOption(network)?.chain;
+  if (!chain) {
+    return undefined;
+  }
+
+  const normalizedKey = apiKey.trim();
+  if (normalizedKey.length === 0) {
+    return undefined;
+  }
+
+  return `https://${chain.id}.g.alchemy.com/v2/${normalizedKey}`;
+};

@@ -1,4 +1,4 @@
-import { Data, Effect } from "effect";
+import { Data, Effect, Schedule } from "effect";
 import {
   createPublicClient,
   erc20Abi,
@@ -10,11 +10,17 @@ import {
   type Hash,
 } from "viem";
 
-import { resolveChainOption } from "./constants";
+import { resolveAlchemyRpcUrl, resolveChainOption, type RpcProvider } from "./constants";
 
 const transferEvent = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 
-const CHUNK_SIZE = 2_000n;
+const CHUNK_SIZE = 10_000n;
+const LOG_PROGRESS_EVERY_CHUNKS = 10;
+const BLOCK_SEARCH_LOG_EVERY_STEPS = 8;
+const RPC_REQUEST_TIMEOUT = "30 seconds";
+const RPC_RETRY_DELAY = "200 millis";
+const RPC_RETRY_TIMES = 2;
+
 type AnyPublicClient = ReturnType<typeof createPublicClient>;
 interface Erc20ReadClient {
   readContract: (parameters: {
@@ -23,6 +29,27 @@ interface Erc20ReadClient {
     functionName: "decimals" | "symbol";
   }) => Promise<string | number | bigint>;
 }
+
+const toErrorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const withRpcTimeoutAndRetry = <A>(
+  effect: Effect.Effect<A, ChainError>,
+  timeoutMessage: string
+): Effect.Effect<A, ChainError> =>
+  effect.pipe(
+    Effect.timeoutFail({
+      duration: RPC_REQUEST_TIMEOUT,
+      onTimeout: () =>
+        new ChainError({
+          message: timeoutMessage,
+        }),
+    }),
+    Effect.retry({
+      schedule: Schedule.exponential(RPC_RETRY_DELAY),
+      times: RPC_RETRY_TIMES,
+    })
+  );
+
 const queryTransferLogs = (
   client: AnyPublicClient,
   tokenAddress: Address,
@@ -80,7 +107,11 @@ const parseUtcDate = (date: string, endOfDay = false): Effect.Effect<number, Cha
     return Math.floor(timestampMs / 1_000);
   });
 
-const makeClient = (network: string): Effect.Effect<{ client: AnyPublicClient; networkKey: string }, ChainError> =>
+const makeClient = (
+  network: string,
+  rpcProvider: RpcProvider,
+  alchemyApiKey?: string
+): Effect.Effect<{ client: AnyPublicClient; networkKey: string; rpcUrl: string; rpcMode: RpcProvider }, ChainError> =>
   Effect.sync(() => {
     const chainOption = resolveChainOption(network);
     if (!chainOption) {
@@ -89,28 +120,95 @@ const makeClient = (network: string): Effect.Effect<{ client: AnyPublicClient; n
       });
     }
 
+    let rpcUrl: string | undefined;
+    let rpcMode: RpcProvider = rpcProvider;
+
+    if (rpcProvider === "alchemy") {
+      const alchemyUrl = resolveAlchemyRpcUrl(network, alchemyApiKey ?? "");
+      if (!alchemyUrl) {
+        throw new ChainError({
+          message: "Alchemy is selected but no valid Alchemy API key is configured.",
+        });
+      }
+      rpcUrl = alchemyUrl;
+    } else {
+      rpcUrl = chainOption.chain.rpcUrls.default.http[0];
+    }
+
+    if (!rpcUrl) {
+      throw new ChainError({
+        message: `No RPC URL available for network \"${network}\".`,
+      });
+    }
+
     return {
       client: createPublicClient({
         chain: chainOption.chain,
-        transport: http(),
+        transport: http(rpcUrl),
       }),
       networkKey: chainOption.key,
+      rpcUrl,
+      rpcMode,
     };
   });
+
+const fetchLatestBlock = (client: AnyPublicClient): Effect.Effect<{ number: bigint; timestamp: number }, ChainError> =>
+  withRpcTimeoutAndRetry(
+    Effect.promise(async () => {
+      const latest = await client.getBlock({ blockTag: "latest" });
+      return {
+        number: latest.number,
+        timestamp: Number(latest.timestamp),
+      };
+    }).pipe(
+      Effect.catchAllDefect((error) =>
+        Effect.fail(
+          new ChainError({
+            message: `Failed to load latest block: ${toErrorMessage(error)}`,
+          })
+        )
+      )
+    ),
+    "Timed out loading latest block from RPC"
+  );
+
+const fetchBlockTimestamp = (
+  client: AnyPublicClient,
+  blockNumber: bigint
+): Effect.Effect<number, ChainError> =>
+  withRpcTimeoutAndRetry(
+    Effect.promise(() => client.getBlock({ blockNumber })).pipe(
+      Effect.map((block) => Number(block.timestamp)),
+      Effect.catchAllDefect((error) =>
+        Effect.fail(
+          new ChainError({
+            message: `Failed to load block ${blockNumber}: ${toErrorMessage(error)}`,
+          })
+        )
+      )
+    ),
+    `Timed out loading block ${blockNumber} from RPC`
+  );
 
 const findBlockAtOrAfter = (
   client: AnyPublicClient,
   targetTimestamp: number,
-  latestBlock: bigint
+  latestBlock: bigint,
+  label: string
 ): Effect.Effect<bigint, ChainError> =>
-  Effect.promise(async () => {
+  Effect.gen(function* () {
     let left = 0n;
     let right = latestBlock;
+    let steps = 0;
 
     while (left < right) {
+      steps += 1;
+      if (steps === 1 || steps % BLOCK_SEARCH_LOG_EVERY_STEPS === 0) {
+        yield* Effect.logDebug(`Resolving ${label}: step ${steps}, search range ${left}-${right}`);
+      }
+
       const middle = (left + right) / 2n;
-      const block = await client.getBlock({ blockNumber: middle });
-      const blockTimestamp = Number(block.timestamp);
+      const blockTimestamp = yield* fetchBlockTimestamp(client, middle);
 
       if (blockTimestamp < targetTimestamp) {
         left = middle + 1n;
@@ -119,58 +217,51 @@ const findBlockAtOrAfter = (
       }
     }
 
+    yield* Effect.logDebug(`Resolved ${label} at block ${left} after ${steps} step(s)`);
     return left;
-  }).pipe(
-    Effect.catchAllDefect((error) =>
-      Effect.fail(
-        new ChainError({
-          message: `Failed to resolve block for timestamp ${targetTimestamp}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        })
-      )
-    )
-  );
+  });
 
 const fetchTokenMeta = (client: AnyPublicClient, tokenAddress: Address) => {
   const readClient = client as Erc20ReadClient;
 
   return Effect.all({
-    decimals: Effect.promise(() =>
-      readClient.readContract({
-        abi: erc20Abi,
-        address: tokenAddress,
-        functionName: "decimals",
-      })
-    ).pipe(
-      Effect.map((value) => Number(value)),
-      Effect.catchAllDefect((error) =>
-        Effect.fail(
-          new ChainError({
-            message: `Could not read token decimals from ${tokenAddress}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          })
+    decimals: withRpcTimeoutAndRetry(
+      Effect.promise(() =>
+        readClient.readContract({
+          abi: erc20Abi,
+          address: tokenAddress,
+          functionName: "decimals",
+        })
+      ).pipe(
+        Effect.map((value) => Number(value)),
+        Effect.catchAllDefect((error) =>
+          Effect.fail(
+            new ChainError({
+              message: `Could not read token decimals from ${tokenAddress}: ${toErrorMessage(error)}`,
+            })
+          )
         )
-      )
+      ),
+      `Timed out reading token decimals from ${tokenAddress}`
     ),
-    symbol: Effect.promise(() =>
-      readClient.readContract({
-        abi: erc20Abi,
-        address: tokenAddress,
-        functionName: "symbol",
-      })
-    ).pipe(
-      Effect.map((value) => String(value)),
-      Effect.catchAllDefect((error) =>
-        Effect.fail(
-          new ChainError({
-            message: `Could not read token symbol from ${tokenAddress}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          })
+    symbol: withRpcTimeoutAndRetry(
+      Effect.promise(() =>
+        readClient.readContract({
+          abi: erc20Abi,
+          address: tokenAddress,
+          functionName: "symbol",
+        })
+      ).pipe(
+        Effect.map((value) => String(value)),
+        Effect.catchAllDefect((error) =>
+          Effect.fail(
+            new ChainError({
+              message: `Could not read token symbol from ${tokenAddress}: ${toErrorMessage(error)}`,
+            })
+          )
         )
-      )
+      ),
+      `Timed out reading token symbol from ${tokenAddress}`
     ),
   });
 };
@@ -180,7 +271,8 @@ const fetchTransfers = (
   tokenAddress: Address,
   fromBlock: bigint,
   toBlock: bigint,
-  args?: { from?: Address; to?: Address }
+  args?: { from?: Address; to?: Address },
+  label = "transfers"
 ): Effect.Effect<TransferLog[], ChainError> =>
   Effect.gen(function* () {
     const logs: TransferLog[] = [];
@@ -189,19 +281,31 @@ const fetchTransfers = (
       return logs;
     }
 
+    const totalChunks = Number((toBlock - fromBlock) / CHUNK_SIZE + 1n);
+    let chunkIndex = 0;
     let current = fromBlock;
     while (current <= toBlock) {
       const end = current + CHUNK_SIZE > toBlock ? toBlock : current + CHUNK_SIZE;
-      const chunk = yield* Effect.promise(() => queryTransferLogs(client, tokenAddress, current, end, args)).pipe(
-        Effect.catchAllDefect((error) =>
-          Effect.fail(
-            new ChainError({
-              message: `Failed to query transfer logs ${current}-${end}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            })
+      chunkIndex += 1;
+      if (
+        chunkIndex === 1 ||
+        chunkIndex === totalChunks ||
+        chunkIndex % LOG_PROGRESS_EVERY_CHUNKS === 0
+      ) {
+        yield* Effect.logDebug(`Fetching ${label}: chunk ${chunkIndex}/${totalChunks} (blocks ${current}-${end})`);
+      }
+
+      const chunk = yield* withRpcTimeoutAndRetry(
+        Effect.promise(() => queryTransferLogs(client, tokenAddress, current, end, args)).pipe(
+          Effect.catchAllDefect((error) =>
+            Effect.fail(
+              new ChainError({
+                message: `Failed to query transfer logs ${current}-${end}: ${toErrorMessage(error)}`,
+              })
+            )
           )
-        )
+        ),
+        `Timed out querying ${label} for block range ${current}-${end}`
       );
 
       logs.push(...chunk);
@@ -219,10 +323,11 @@ const fetchWalletTransfers = (
   toBlock: bigint
 ): Effect.Effect<TransferLog[], ChainError> =>
   Effect.gen(function* () {
-    const [incoming, outgoing] = yield* Effect.all([
-      fetchTransfers(client, tokenAddress, fromBlock, toBlock, { to: wallet }),
-      fetchTransfers(client, tokenAddress, fromBlock, toBlock, { from: wallet }),
-    ]);
+    yield* Effect.logDebug("Scanning incoming transfer logs...");
+    const incoming = yield* fetchTransfers(client, tokenAddress, fromBlock, toBlock, { to: wallet }, "incoming");
+
+    yield* Effect.logDebug("Scanning outgoing transfer logs...");
+    const outgoing = yield* fetchTransfers(client, tokenAddress, fromBlock, toBlock, { from: wallet }, "outgoing");
 
     const deduped = new Map<string, TransferLog>();
     for (const entry of [...incoming, ...outgoing]) {
@@ -236,22 +341,13 @@ const resolveBlockTimestamps = (client: AnyPublicClient, blockNumbers: readonly 
   Effect.forEach(
     blockNumbers,
     (blockNumber) =>
-      Effect.promise(async () => {
-          const block = await client.getBlock({ blockNumber });
-          return {
-            blockNumber,
-            timestamp: Number(block.timestamp),
-          };
-        }).pipe(
-          Effect.catchAllDefect((error) =>
-            Effect.fail(
-              new ChainError({
-                message: `Failed to load block ${blockNumber}: ${error instanceof Error ? error.message : String(error)}`,
-              })
-            )
-          )
-        ),
-    { concurrency: 8 }
+      fetchBlockTimestamp(client, blockNumber).pipe(
+        Effect.map((timestamp) => ({
+          blockNumber,
+          timestamp,
+        }))
+      ),
+    { concurrency: 4 }
   );
 
 export const assertAddress = (value: string, label = "address"): Effect.Effect<Address, ChainError> =>
@@ -270,6 +366,8 @@ export const getTransferRecords = (params: {
   fromDate: string;
   toDate: string;
   walletAddress: Address;
+  rpcProvider?: RpcProvider;
+  alchemyApiKey?: string;
 }): Effect.Effect<readonly TransferRecord[], ChainError> =>
   Effect.gen(function* () {
     const fromTimestamp = yield* parseUtcDate(params.fromDate, false);
@@ -283,44 +381,54 @@ export const getTransferRecords = (params: {
       );
     }
 
-    const { client, networkKey } = yield* makeClient(params.network);
+    const { client, networkKey, rpcUrl, rpcMode } = yield* makeClient(
+      params.network,
+      params.rpcProvider ?? "public",
+      params.alchemyApiKey
+    );
+    yield* Effect.logDebug(`RPC client ready for network=${networkKey}, mode=${rpcMode}, endpoint=${rpcUrl}`);
 
-    const latestBlock = yield* Effect.promise(async () => {
-        const latest = await client.getBlock({ blockTag: "latest" });
-        return {
-          number: latest.number,
-          timestamp: Number(latest.timestamp),
-        };
-      }).pipe(
-        Effect.catchAllDefect((error) =>
-          Effect.fail(
-            new ChainError({
-              message: `Failed to load latest block: ${error instanceof Error ? error.message : String(error)}`,
-            })
-          )
-        )
-      );
+    yield* Effect.logDebug("Loading latest block...");
+    const latestBlock = yield* fetchLatestBlock(client);
+    yield* Effect.logDebug(
+      `Latest block=${latestBlock.number} timestamp=${latestBlock.timestamp} (${new Date(latestBlock.timestamp * 1_000).toISOString()})`
+    );
 
-    const fromBlock = yield* findBlockAtOrAfter(client, fromTimestamp, latestBlock.number);
+    yield* Effect.logDebug(`Resolving start block for ${params.fromDate}...`);
+    const fromBlock = yield* findBlockAtOrAfter(client, fromTimestamp, latestBlock.number, `from=${params.fromDate}`);
 
     const toBlock =
       toTimestamp >= latestBlock.timestamp
         ? latestBlock.number
-        : (yield* findBlockAtOrAfter(client, toTimestamp + 1, latestBlock.number)) - 1n;
+        : (yield* findBlockAtOrAfter(client, toTimestamp + 1, latestBlock.number, `to=${params.toDate}`)) - 1n;
 
     if (fromBlock > toBlock) {
       return [];
     }
 
-    const tokenMeta = yield* fetchTokenMeta(client, params.tokenAddress);
+    const estimatedChunksPerDirection = Number((toBlock - fromBlock) / CHUNK_SIZE + 1n);
+    yield* Effect.logDebug(
+      `Resolved block range ${fromBlock}-${toBlock} (~${estimatedChunksPerDirection} chunks per direction)`
+    );
 
-    const rawLogs = yield* fetchWalletTransfers(client, params.tokenAddress, params.walletAddress, fromBlock, toBlock);
+    yield* Effect.logDebug(`Loading token metadata for ${params.tokenAddress}...`);
+    const tokenMeta = yield* fetchTokenMeta(client, params.tokenAddress);
+    yield* Effect.logDebug(`Token metadata: symbol=${tokenMeta.symbol}, decimals=${tokenMeta.decimals}`);
+
+    const rawLogs = yield* fetchWalletTransfers(
+      client,
+      params.tokenAddress,
+      params.walletAddress,
+      fromBlock,
+      toBlock
+    );
 
     if (rawLogs.length === 0) {
       return [];
     }
 
     const uniqueBlocks = [...new Set(rawLogs.map((entry) => String(entry.blockNumber)))].map((value) => BigInt(value));
+    yield* Effect.logDebug(`Resolving timestamps for ${uniqueBlocks.length} unique block(s)...`);
     const timestamps = yield* resolveBlockTimestamps(client, uniqueBlocks);
     const timestampByBlock = new Map(timestamps.map((entry) => [entry.blockNumber.toString(), entry.timestamp]));
 

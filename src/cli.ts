@@ -1,20 +1,23 @@
 #!/usr/bin/env node
-import { Command, Prompt } from "@effect/cli";
+import { Command, Options, Prompt } from "@effect/cli";
 import { NodeContext, NodeHttpClient, NodeRuntime } from "@effect/platform-node";
-import { Console, Effect, Layer } from "effect";
+import { Console, Effect, Layer, LogLevel, Logger } from "effect";
 import type { Address } from "viem";
 
 import {
   type AppConfig,
-  loadConfig,
-  loadConfigOptional,
-  saveConfig,
+  type AppConfigStore,
+  type NamedAppConfig,
+  loadConfigStore,
+  loadConfigStoreOptional,
+  saveConfigStore,
 } from "./config";
 import {
   CHAIN_OPTIONS,
   getExplorerTxUrl,
   getNetworkDisplayName,
   getTokenSuggestions,
+  type RpcProvider,
 } from "./constants";
 import { RpcService, type TransferRecord } from "./erc20";
 import {
@@ -50,6 +53,40 @@ const promptRequired = (message: string, defaultValue?: string) =>
     })
   ).pipe(Effect.map((value) => value.trim()));
 
+const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const isValidIsoDate = (value: string): boolean => {
+  const input = value.trim();
+  const match = ISO_DATE_PATTERN.exec(input);
+  if (!match) {
+    return false;
+  }
+
+  const [, yearRaw, monthRaw, dayRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return false;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+};
+
+const promptIsoDate = (message: string, defaultValue?: string) =>
+  Prompt.run(
+    Prompt.text({
+      message,
+      ...(defaultValue !== undefined ? { default: defaultValue } : {}),
+      validate: (value) =>
+        isValidIsoDate(value)
+          ? Effect.succeed(value)
+          : Effect.fail("Invalid date. Use YYYY-MM-DD (example: 2025-02-01)."),
+    })
+  ).pipe(Effect.map((value) => value.trim()));
+
 const promptSelect = <A>(
   message: string,
   choices: ReadonlyArray<{ title: string; value: A; description?: string }>
@@ -74,6 +111,31 @@ const journalLabel = (journal: OdooJournalRecord) => {
 
 const companyLabel = (company: OdooCompanyRecord) => `${company.name} (id=${company.id})`;
 
+const configLabel = (profile: NamedAppConfig) =>
+  `${profile.name} | ${getNetworkDisplayName(profile.network)} (${profile.network}) | ${profile.tokenSymbol ?? "ERC-20"} ${profile.tokenAddress}`;
+
+const orderProfiles = (profiles: readonly NamedAppConfig[], defaultProfile?: string): NamedAppConfig[] =>
+  [...profiles].sort((a, b) => {
+    const aDefault = defaultProfile != null && a.name === defaultProfile;
+    const bDefault = defaultProfile != null && b.name === defaultProfile;
+    if (aDefault && !bDefault) {
+      return -1;
+    }
+    if (!aDefault && bDefault) {
+      return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+const pickProfile = (message: string, profiles: readonly NamedAppConfig[], defaultProfile?: string) =>
+  promptSelect(
+    message,
+    orderProfiles(profiles, defaultProfile).map((profile) => ({
+      title: configLabel(profile),
+      value: profile,
+    }))
+  );
+
 const toShortCode = (name: string): string => {
   const alpha = name
     .toUpperCase()
@@ -87,15 +149,74 @@ const toShortCode = (name: string): string => {
   return `${alpha}JNL`.slice(0, 5);
 };
 
-const pickNetwork = () =>
-  promptSelect("Choose blockchain network", CHAIN_OPTIONS.map((network) => ({ title: network.title, value: network.key })));
+const pickNetwork = (preferredNetwork?: string) => {
+  const ordered = [...CHAIN_OPTIONS].sort((a, b) => {
+    const aPreferred = preferredNetwork != null && a.key === preferredNetwork;
+    const bPreferred = preferredNetwork != null && b.key === preferredNetwork;
+    if (aPreferred && !bPreferred) {
+      return -1;
+    }
+    if (!aPreferred && bPreferred) {
+      return 1;
+    }
+    return a.title.localeCompare(b.title);
+  });
 
-const pickTokenAddress = (network: string) =>
+  return promptSelect(
+    "Choose blockchain network",
+    ordered.map((network) => ({ title: network.title, value: network.key }))
+  );
+};
+
+const pickRpcProvider = (existing?: RpcProvider) => {
+  const publicOption = {
+    title: "Public RPC (default)",
+    value: "public" as const,
+    description: "Uses chain default RPC endpoint (no API key).",
+  };
+  const alchemyOption = {
+    title: "Alchemy API key",
+    value: "alchemy" as const,
+    description: "Uses https://<chainId>.g.alchemy.com/v2/<key>.",
+  };
+
+  const choices = existing === "alchemy" ? [alchemyOption, publicOption] : [publicOption, alchemyOption];
+  return promptSelect("RPC provider", choices);
+};
+
+const pickTokenAddress = (network: string, existingTokenAddress?: Address, existingTokenSymbol?: string) =>
   Effect.gen(function* () {
     const suggestions = getTokenSuggestions(network);
+    const existingLower = existingTokenAddress?.toLowerCase();
+
+    const orderedSuggestions = [...suggestions].sort((a, b) => {
+      const aPreferred = existingLower != null && a.address.toLowerCase() === existingLower;
+      const bPreferred = existingLower != null && b.address.toLowerCase() === existingLower;
+      if (aPreferred && !bPreferred) {
+        return -1;
+      }
+      if (!aPreferred && bPreferred) {
+        return 1;
+      }
+      return 0;
+    });
+
+    const knownExistingToken =
+      existingLower != null && orderedSuggestions.some((suggestion) => suggestion.address.toLowerCase() === existingLower);
+
+    const configuredChoice =
+      existingTokenAddress && !knownExistingToken
+        ? [
+            {
+              title: `Current configured token - ${existingTokenAddress}`,
+              value: { tokenAddress: existingTokenAddress, tokenSymbol: existingTokenSymbol },
+            },
+          ]
+        : [];
 
     const tokenChoice = yield* promptSelect("Choose ERC-20 token contract", [
-      ...suggestions.map((suggestion) => ({
+      ...configuredChoice,
+      ...orderedSuggestions.map((suggestion) => ({
         title: `${suggestion.symbol} (${getNetworkDisplayName(suggestion.networkKey)} / ${suggestion.networkKey}) - ${suggestion.address}`,
         value: { tokenAddress: suggestion.address, tokenSymbol: suggestion.symbol as string | undefined },
       })),
@@ -122,125 +243,238 @@ const pickTokenAddress = (network: string) =>
     };
   });
 
-const setupProgram = Effect.gen(function* () {
-  const existing = yield* loadConfigOptional();
+const promptProfileName = (
+  profiles: readonly NamedAppConfig[],
+  defaultValue: string,
+  currentName?: string
+) =>
+  Prompt.run(
+    Prompt.text({
+      message: "Config profile name",
+      default: defaultValue,
+      validate: (value) => {
+        const name = value.trim();
+        if (name.length === 0) {
+          return Effect.fail("Config profile name is required.");
+        }
+        const duplicate = profiles.some((profile) => profile.name === name && profile.name !== currentName);
+        return duplicate ? Effect.fail(`Config profile "${name}" already exists.`) : Effect.succeed(value);
+      },
+    })
+  ).pipe(Effect.map((value) => value.trim()));
 
-  const odooUrl = yield* promptRequired("Odoo URL", existing?.odooUrl ?? process.env.ODOO_URL ?? "");
-  const odooApiKey = yield* promptRequired(
-    "Odoo API Key",
-    existing?.odooApiKey ?? process.env.ODOO_API_KEY ?? ""
-  );
+const configureProfile = (existingProfile: NamedAppConfig | undefined, allProfiles: readonly NamedAppConfig[]) =>
+  Effect.gen(function* () {
+    const defaultName = existingProfile?.name ?? `config-${allProfiles.length + 1}`;
+    const profileName = yield* promptProfileName(allProfiles, defaultName, existingProfile?.name);
 
-  const client = {
-    apiKey: odooApiKey,
-    baseUrl: odooUrl,
-  } satisfies OdooClientConfig;
+    const odooUrl = yield* promptRequired("Odoo URL", existingProfile?.odooUrl ?? process.env.ODOO_URL ?? "");
+    const odooApiKey = yield* promptRequired(
+      "Odoo API Key",
+      existingProfile?.odooApiKey ?? process.env.ODOO_API_KEY ?? ""
+    );
 
-  const companies = yield* OdooService.listCompanies(client);
-  if (companies.length === 0) {
-    return yield* Effect.fail(new Error("No company exists in Odoo for this API key."));
-  }
+    const client = {
+      apiKey: odooApiKey,
+      baseUrl: odooUrl,
+    } satisfies OdooClientConfig;
 
-  const sortedCompanies = [...companies].sort((a, b) => {
-    const aPreferred = existing?.companyId != null && a.id === existing.companyId;
-    const bPreferred = existing?.companyId != null && b.id === existing.companyId;
-    if (aPreferred && !bPreferred) {
-      return -1;
-    }
-    if (!aPreferred && bPreferred) {
-      return 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
-
-  const selectedCompany = yield* promptSelect(
-    "Odoo company",
-    sortedCompanies.map((company) => ({
-      title: companyLabel(company),
-      value: company,
-    }))
-  );
-
-  const journals = yield* OdooService.listJournals(client, selectedCompany.id);
-
-  const journalMode = yield* promptSelect("Odoo journal", [
-    {
-      title: "Use an existing journal",
-      value: "existing" as const,
-    },
-    {
-      title: "Create a new journal",
-      value: "create" as const,
-    },
-  ]);
-
-  let journalId = existing?.journalId ?? 0;
-  let journalName = existing?.journalName ?? "";
-
-  if (journalMode === "existing") {
-    if (journals.length === 0) {
-      return yield* Effect.fail(
-        new Error(`No journal exists in company "${selectedCompany.name}". Choose "Create a new journal".`)
-      );
+    const companies = yield* OdooService.listCompanies(client);
+    if (companies.length === 0) {
+      return yield* Effect.fail(new Error("No company exists in Odoo for this API key."));
     }
 
-    const selectedJournal = yield* promptSelect(
-      "Select existing journal",
-      journals.map((journal) => ({
-        title: journalLabel(journal),
-        value: journal,
+    const sortedCompanies = [...companies].sort((a, b) => {
+      const aPreferred = existingProfile?.companyId != null && a.id === existingProfile.companyId;
+      const bPreferred = existingProfile?.companyId != null && b.id === existingProfile.companyId;
+      if (aPreferred && !bPreferred) {
+        return -1;
+      }
+      if (!aPreferred && bPreferred) {
+        return 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+
+    const selectedCompany = yield* promptSelect(
+      "Odoo company",
+      sortedCompanies.map((company) => ({
+        title: companyLabel(company),
+        value: company,
       }))
     );
 
-    journalId = selectedJournal.id;
-    journalName = selectedJournal.name;
-  } else {
-    const name = yield* promptRequired("New journal name", existing?.journalName ?? "Crypto Transfers");
-    const code = yield* promptRequired("New journal short code", toShortCode(name));
-    const currencyCode = yield* promptText("Journal currency code (optional, e.g. USD/EUR)", "");
+    const journals = yield* OdooService.listJournals(client, selectedCompany.id);
 
-    const createdJournal = yield* OdooService.createJournal(client, {
-      code,
+    const journalMode = yield* promptSelect("Odoo journal", [
+      {
+        title: "Use an existing journal",
+        value: "existing" as const,
+      },
+      {
+        title: "Create a new journal",
+        value: "create" as const,
+      },
+    ]);
+
+    let journalId = existingProfile?.journalId ?? 0;
+    let journalName = existingProfile?.journalName ?? "";
+
+    if (journalMode === "existing") {
+      if (journals.length === 0) {
+        return yield* Effect.fail(
+          new Error(`No journal exists in company "${selectedCompany.name}". Choose "Create a new journal".`)
+        );
+      }
+
+      const sortedJournals = [...journals].sort((a, b) => {
+        const aPreferred = existingProfile?.journalId != null && a.id === existingProfile.journalId;
+        const bPreferred = existingProfile?.journalId != null && b.id === existingProfile.journalId;
+        if (aPreferred && !bPreferred) {
+          return -1;
+        }
+        if (!aPreferred && bPreferred) {
+          return 1;
+        }
+        return a.name.localeCompare(b.name);
+      });
+
+      const selectedJournal = yield* promptSelect(
+        "Select existing journal",
+        sortedJournals.map((journal) => ({
+          title: journalLabel(journal),
+          value: journal,
+        }))
+      );
+
+      journalId = selectedJournal.id;
+      journalName = selectedJournal.name;
+    } else {
+      const name = yield* promptRequired("New journal name", existingProfile?.journalName ?? "Crypto Transfers");
+      const code = yield* promptRequired("New journal short code", toShortCode(name));
+      const currencyCode = yield* promptText("Journal currency code (optional, e.g. USD/EUR)", "");
+
+      const createdJournal = yield* OdooService.createJournal(client, {
+        code,
+        companyId: selectedCompany.id,
+        currencyCode: currencyCode.trim().length > 0 ? currencyCode : undefined,
+        name,
+      });
+
+      journalId = createdJournal.id;
+      journalName = createdJournal.name;
+
+      yield* Console.log(`Created journal ${createdJournal.name} (id=${createdJournal.id}).`);
+    }
+
+    const network = yield* pickNetwork(existingProfile?.network);
+    const rpcProvider = yield* pickRpcProvider(existingProfile?.rpcProvider);
+    const alchemyApiKey =
+      rpcProvider === "alchemy"
+        ? yield* promptRequired("Alchemy API Key", existingProfile?.alchemyApiKey ?? process.env.ALCHEMY_API_KEY ?? "")
+        : undefined;
+    const token = yield* pickTokenAddress(network, existingProfile?.tokenAddress, existingProfile?.tokenSymbol);
+
+    const walletAddress = yield* promptRequired(
+      "Wallet address (required, 0x...)",
+      existingProfile?.walletAddress ?? ""
+    ).pipe(Effect.flatMap((value) => RpcService.assertAddress(value, "wallet address")));
+
+    return {
+      name: profileName,
       companyId: selectedCompany.id,
-      currencyCode: currencyCode.trim().length > 0 ? currencyCode : undefined,
-      name,
-    });
+      companyName: selectedCompany.name,
+      journalId,
+      journalName,
+      network,
+      odooApiKey,
+      odooUrl,
+      tokenAddress: token.tokenAddress,
+      tokenSymbol: token.tokenSymbol,
+      walletAddress,
+      rpcProvider,
+      alchemyApiKey,
+    } satisfies NamedAppConfig;
+  });
 
-    journalId = createdJournal.id;
-    journalName = createdJournal.name;
+const setupProgram = Effect.gen(function* () {
+  const store: AppConfigStore = (yield* loadConfigStoreOptional()) ?? { profiles: [] };
 
-    yield* Console.log(`Created journal ${createdJournal.name} (id=${createdJournal.id}).`);
+  const action =
+    store.profiles.length === 0
+      ? ("add" as const)
+      : yield* promptSelect("Setup action", [
+          {
+            title: "Add a new config profile",
+            value: "add" as const,
+          },
+          {
+            title: "Edit an existing config profile",
+            value: "edit" as const,
+          },
+          {
+            title: "Remove a config profile",
+            value: "remove" as const,
+          },
+        ]);
+
+  if (action === "remove") {
+    const toRemove = yield* pickProfile("Select config profile to remove", store.profiles, store.defaultProfile);
+    const profiles = store.profiles.filter((profile) => profile.name !== toRemove.name);
+    const nextDefaultProfile =
+      store.defaultProfile === toRemove.name ? profiles[0]?.name : store.defaultProfile ?? profiles[0]?.name;
+
+    const nextStore: AppConfigStore = {
+      profiles,
+      ...(nextDefaultProfile ? { defaultProfile: nextDefaultProfile } : {}),
+    };
+    const configPath = yield* saveConfigStore(nextStore);
+
+    yield* Console.log(`\nRemoved config profile "${toRemove.name}".`);
+    yield* Console.log(`File: ${configPath}`);
+    if (profiles.length === 0) {
+      yield* Console.log("No config profiles left. Run `bun run setup` to add one.");
+    } else {
+      yield* Console.log(`Remaining profiles: ${profiles.length}`);
+      yield* Console.log(`Default profile: ${nextStore.defaultProfile}`);
+    }
+    return;
   }
 
-  const network = yield* pickNetwork();
-  const token = yield* pickTokenAddress(network);
+  const profileToEdit =
+    action === "edit"
+      ? yield* pickProfile("Select config profile to edit", store.profiles, store.defaultProfile)
+      : undefined;
 
-  const walletAddress = yield* promptRequired("Wallet address (required, 0x...)", existing?.walletAddress ?? "").pipe(
-    Effect.flatMap((value) => RpcService.assertAddress(value, "wallet address"))
-  );
+  const configuredProfile = yield* configureProfile(profileToEdit, store.profiles);
 
-  const config: AppConfig = {
-    companyId: selectedCompany.id,
-    companyName: selectedCompany.name,
-    journalId,
-    journalName,
-    network,
-    odooApiKey,
-    odooUrl,
-    tokenAddress: token.tokenAddress,
-    tokenSymbol: token.tokenSymbol,
-    walletAddress,
+  const profiles =
+    action === "edit" && profileToEdit
+      ? store.profiles.map((profile) => (profile.name === profileToEdit.name ? configuredProfile : profile))
+      : [...store.profiles, configuredProfile];
+
+  const nextStore: AppConfigStore = {
+    profiles,
+    defaultProfile: configuredProfile.name,
   };
 
-  const configPath = yield* saveConfig(config);
+  const configPath = yield* saveConfigStore(nextStore);
 
   yield* Console.log("\nConfiguration saved.");
   yield* Console.log(`File: ${configPath}`);
-  yield* Console.log(`Company: ${selectedCompany.name} (id=${selectedCompany.id})`);
-  yield* Console.log(`Journal: ${journalName} (id=${journalId})`);
-  yield* Console.log(`Network: ${getNetworkDisplayName(network)} (${network})`);
-  yield* Console.log(`Token: ${token.tokenAddress}`);
-  yield* Console.log(`Wallet filter: ${walletAddress}`);
+  yield* Console.log(`Profile: ${configuredProfile.name}`);
+  yield* Console.log(`Company: ${configuredProfile.companyName} (id=${configuredProfile.companyId})`);
+  yield* Console.log(`Journal: ${configuredProfile.journalName} (id=${configuredProfile.journalId})`);
+  yield* Console.log(
+    `Network: ${getNetworkDisplayName(configuredProfile.network)} (${configuredProfile.network})`
+  );
+  yield* Console.log(`RPC provider: ${configuredProfile.rpcProvider}`);
+  if (configuredProfile.rpcProvider === "alchemy") {
+    yield* Console.log(`Alchemy API Key: ${configuredProfile.alchemyApiKey ? "configured" : "missing"}`);
+  }
+  yield* Console.log(`Token: ${configuredProfile.tokenAddress}`);
+  yield* Console.log(`Wallet filter: ${configuredProfile.walletAddress}`);
+  yield* Console.log(`Total profiles: ${profiles.length}`);
 });
 
 const toStatementLine = (config: AppConfig, transfer: TransferRecord) => {
@@ -265,87 +499,116 @@ const chunk = <T>(items: readonly T[], chunkSize: number): T[][] => {
   return chunks;
 };
 
-const syncProgram = Effect.gen(function* () {
-  const config = yield* loadConfig();
-  const walletAddress = config.walletAddress;
-  if (!walletAddress) {
-    return yield* Effect.fail(
-      new Error("Wallet address is required. Run `bun run setup` to configure a wallet filter.")
-    );
-  }
-
-  const fromDate = yield* promptRequired("From date (YYYY-MM-DD)", defaultFromDate());
-  const toDate = yield* promptRequired("To date (YYYY-MM-DD)", todayIso());
-
-  yield* Console.log("\nReading ERC-20 transfer logs...");
-
-  const transfers = yield* RpcService.getTransferRecords({
-    fromDate,
-    network: config.network,
-    toDate,
-    tokenAddress: config.tokenAddress,
-    walletAddress,
-  });
-
-  if (transfers.length === 0) {
-    yield* Console.log("No transfers found in this date range.");
-    return;
-  }
-
-  yield* Console.log(`Found ${transfers.length} transfer(s). Preparing Odoo statement lines...`);
-
-  const client = {
-    apiKey: config.odooApiKey,
-    baseUrl: config.odooUrl,
-  } satisfies OdooClientConfig;
-
-  const lines = transfers.map((transfer) => toStatementLine(config, transfer));
-  const importIds = lines.map((line) => line.unique_import_id);
-
-  const existingImportIds = yield* OdooService.fetchExistingImportIds(client, importIds, {
-    chunkSize: 100,
-    companyId: config.companyId,
-    journalId: config.journalId,
-  });
-  const newLines = lines.filter((line) => !existingImportIds.has(line.unique_import_id));
-
-  if (newLines.length === 0) {
-    yield* Console.log("All transfers already exist in Odoo (deduplicated by unique_import_id).");
-    return;
-  }
-
-  let created = 0;
-  const batches = chunk(newLines, 200);
-
-  for (const batch of batches) {
-    yield* OdooService.createStatementLinesBatch(client, batch);
-    created += batch.length;
-    yield* Console.log(`Created ${created}/${newLines.length} statement lines...`);
-  }
-
-  yield* Console.log("\nSync completed.");
-  yield* Console.log(`Transfers found: ${transfers.length}`);
-  yield* Console.log(`Already existing in Odoo: ${existingImportIds.size}`);
-  yield* Console.log(`Newly created: ${created}`);
-});
-
-const setupCommand = Command.make("setup", {}, () => setupProgram).pipe(
-  Command.withDescription("Configure Odoo, journal, network, and ERC-20 token settings")
+const verboseOption = Options.boolean("verbose").pipe(
+  Options.withAlias("v"),
+  Options.withDescription("Enable detailed sync logs (block ranges, chunk progress, and timing)"),
+  Options.withDefault(false)
 );
 
-const syncCommand = Command.make("sync", {}, () => syncProgram).pipe(
+const syncProgram = (options: { verbose: boolean }) => {
+  const program = Effect.gen(function* () {
+    const store = yield* loadConfigStore();
+    if (store.profiles.length === 0) {
+      return yield* Effect.fail(
+        new Error("No config profiles found. Run `bun run setup` and add at least one config profile.")
+      );
+    }
+
+    const config = yield* pickProfile("Choose config profile for sync", store.profiles, store.defaultProfile);
+    const walletAddress = config.walletAddress;
+    if (!walletAddress) {
+      return yield* Effect.fail(
+        new Error(`Wallet address is required in profile "${config.name}". Run \`bun run setup\`.`)
+      );
+    }
+
+    const fromDate = yield* promptIsoDate("From date (YYYY-MM-DD)", defaultFromDate());
+    const toDate = yield* promptIsoDate("To date (YYYY-MM-DD)", todayIso());
+    const rpcProvider = config.rpcProvider ?? (process.env.ALCHEMY_API_KEY ? "alchemy" : "public");
+    const alchemyApiKey = config.alchemyApiKey ?? process.env.ALCHEMY_API_KEY;
+
+    const startedAt = Date.now();
+    const elapsed = () => `${((Date.now() - startedAt) / 1_000).toFixed(1)}s`;
+
+    yield* Effect.logInfo("Reading ERC-20 transfer logs...");
+    yield* Effect.logDebug(
+      `Sync config: profile=${config.name}, network=${config.network}, token=${config.tokenAddress}, wallet=${walletAddress}, range=${fromDate}..${toDate}, rpcProvider=${rpcProvider}`
+    );
+
+    const transfers = yield* RpcService.getTransferRecords({
+      alchemyApiKey,
+      fromDate,
+      network: config.network,
+      rpcProvider,
+      toDate,
+      tokenAddress: config.tokenAddress,
+      walletAddress,
+    });
+    yield* Effect.logDebug(`Transfer fetch finished after ${elapsed()}`);
+
+    if (transfers.length === 0) {
+      yield* Effect.logInfo("No transfers found in this date range.");
+      return;
+    }
+
+    yield* Effect.logInfo(`Found ${transfers.length} transfer(s). Preparing Odoo statement lines...`);
+
+    const client = {
+      apiKey: config.odooApiKey,
+      baseUrl: config.odooUrl,
+    } satisfies OdooClientConfig;
+
+    const lines = transfers.map((transfer) => toStatementLine(config, transfer));
+    const importIds = lines.map((line) => line.unique_import_id);
+
+    yield* Effect.logDebug(`Checking ${importIds.length} import id(s) for deduplication in Odoo...`);
+    const existingImportIds = yield* OdooService.fetchExistingImportIds(client, importIds, {
+      chunkSize: 100,
+      companyId: config.companyId,
+      journalId: config.journalId,
+    });
+    const newLines = lines.filter((line) => !existingImportIds.has(line.unique_import_id));
+    yield* Effect.logDebug(`Dedup result: existing=${existingImportIds.size}, new=${newLines.length}`);
+
+    if (newLines.length === 0) {
+      yield* Effect.logInfo("All transfers already exist in Odoo (deduplicated by unique_import_id).");
+      return;
+    }
+
+    let created = 0;
+    const batches = chunk(newLines, 200);
+    yield* Effect.logDebug(`Writing ${newLines.length} statement line(s) in ${batches.length} batch(es)...`);
+
+    for (const batch of batches) {
+      yield* OdooService.createStatementLinesBatch(client, batch);
+      created += batch.length;
+      yield* Effect.logInfo(`Created ${created}/${newLines.length} statement lines...`);
+    }
+
+    yield* Effect.logInfo("Sync completed.");
+    yield* Effect.logInfo(`Profile: ${config.name}`);
+    yield* Effect.logInfo(`Transfers found: ${transfers.length}`);
+    yield* Effect.logInfo(`Already existing in Odoo: ${existingImportIds.size}`);
+    yield* Effect.logInfo(`Newly created: ${created}`);
+    yield* Effect.logDebug(`Total elapsed: ${elapsed()}`);
+  });
+
+  return options.verbose ? program.pipe(Logger.withMinimumLogLevel(LogLevel.Debug)) : program;
+};
+
+const setupCommand = Command.make("setup", {}, () => setupProgram).pipe(
+  Command.withDescription("Manage config profiles (add, edit, remove) for Odoo + ERC-20 sync")
+);
+
+const syncCommand = Command.make("sync", { verbose: verboseOption }, (options) => syncProgram(options)).pipe(
   Command.withDescription("Import ERC-20 transfer transaction data into Odoo")
 );
 
-const transferCommand = Command.make("transfer", {}, () => syncProgram).pipe(
-  Command.withDescription("Alias of sync")
-);
-
 const rootCommand = Command.make("crypto-odoo-sync", {}, () =>
-  Console.log("Use a subcommand: setup, sync, or transfer")
+  Console.log("Use a subcommand: setup or sync")
 ).pipe(
   Command.withDescription("Transfer ERC-20 transaction data into an Odoo journal"),
-  Command.withSubcommands([setupCommand, syncCommand, transferCommand])
+  Command.withSubcommands([setupCommand, syncCommand])
 );
 
 const cli = Command.run(rootCommand, {

@@ -53,21 +53,29 @@ curl -L \
 
 ## Setup (`bun run setup`)
 
-The setup command is interactive and asks for:
+The setup command is interactive and lets you:
 
+- add a new config profile
+- edit an existing config profile
+- remove a config profile
+
+When creating/editing a profile, it asks for:
 - Odoo URL
 - Odoo API key
 - Odoo company (selected first)
 - Odoo journal (existing or create new, scoped to selected company)
 - Network (all `viem/chains` options)
+- RPC provider (public or Alchemy API key)
 - ERC-20 token address (USDC/EURC suggestions + custom input)
 - Wallet address filter (required)
 
-It saves your configuration to:
+All profiles are saved to:
 
 `.erc20-odoo-sync.config.json`
 
 ## Sync (`bun run sync`)
+
+First, choose the config profile to use.
 
 Prompts for:
 - `from` date (`YYYY-MM-DD`)
@@ -79,21 +87,19 @@ Then it:
 - de-duplicates by `unique_import_id`
 - creates new lines in Odoo
 
-Alias:
-
-`bun run transfer`
-
 ## Commands
 
 ```bash
 bun run setup
 bun run sync
-bun run transfer
+bun run sync -- --verbose
+bun run sync -- --log-level debug
 bun run start -- --help
 ```
 
 ## Tips
 
-- This tool only ingests transfers for one configured wallet address.
+- Each profile ingests transfers for exactly one configured wallet address.
 - Release binaries are built with Bun baseline targets for broader CPU compatibility.
-- If setup fails, run `bun run setup` again to overwrite config.
+- Use `bun run setup` anytime to add/remove profiles or update existing ones.
+- If you used an older single-config file format, run `bun run setup` once to recreate the config file.
