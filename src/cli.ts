@@ -16,6 +16,7 @@ import {
 	type NamedAppConfig,
 	saveConfigStore,
 } from "./config";
+import { FrankfurterService } from "./frankfurter";
 import {
 	CHAIN_OPTIONS,
 	getExplorerTxUrl,
@@ -123,8 +124,13 @@ const journalLabel = (journal: OdooJournalRecord) => {
 	return `${journal.name} (id=${journal.id}, type=${journal.type}, ${currency})`;
 };
 
-const companyLabel = (company: OdooCompanyRecord) =>
-	`${company.name} (id=${company.id})`;
+const companyCurrencyCode = (company: OdooCompanyRecord): string | undefined =>
+	Array.isArray(company.currency_id) ? company.currency_id[1] : undefined;
+
+const companyLabel = (company: OdooCompanyRecord) => {
+	const currency = companyCurrencyCode(company);
+	return `${company.name} (id=${company.id}${currency ? `, ${currency}` : ""})`;
+};
 
 const configLabel = (profile: NamedAppConfig) =>
 	`${profile.journalName} (profile id=${profile.id}) | ${getNetworkDisplayName(profile.network)} (${profile.network}) | ${profile.tokenSymbol ?? "ERC-20"} ${profile.tokenAddress}`;
@@ -829,6 +835,177 @@ const syncProgram = (options: { verbose: boolean }) => {
 		: program.pipe(Effect.provide(nonVerboseLoggerLayer));
 };
 
+const backfillRatesProgram = Effect.gen(function* () {
+	const store = yield* loadConfigStoreOptional();
+
+	let odooUrl: string;
+	let odooApiKey: string;
+
+	if (store && store.profiles.length > 0) {
+		const source = yield* promptSelect("Odoo connection", [
+			{
+				title: "Use credentials from existing profile",
+				value: "profile" as const,
+			},
+			{
+				title: "Enter credentials manually",
+				value: "manual" as const,
+			},
+		]);
+
+		if (source === "profile") {
+			const profile = yield* pickProfile(
+				"Select profile for Odoo credentials",
+				store.profiles,
+				store.defaultProfileId,
+			);
+			odooUrl = profile.odooUrl;
+			odooApiKey = profile.odooApiKey;
+		} else {
+			odooUrl = yield* promptRequired("Odoo URL");
+			odooApiKey = yield* promptRequired("Odoo API Key");
+		}
+	} else {
+		odooUrl = yield* promptRequired("Odoo URL");
+		odooApiKey = yield* promptRequired("Odoo API Key");
+	}
+
+	const client = {
+		apiKey: odooApiKey,
+		baseUrl: odooUrl,
+	} satisfies OdooClientConfig;
+
+	const companies = yield* OdooService.listCompanies(client);
+	if (companies.length === 0) {
+		return yield* Effect.fail(
+			new Error("No companies found in Odoo for this API key."),
+		);
+	}
+
+	const selectedCompany = yield* promptSelect(
+		"Odoo company",
+		companies.map((company) => ({
+			title: companyLabel(company),
+			value: company,
+		})),
+	);
+
+	const baseCurrency = companyCurrencyCode(selectedCompany);
+	if (!baseCurrency) {
+		return yield* Effect.fail(
+			new Error(
+				`Company "${selectedCompany.name}" has no currency configured. Set a currency on the company in Odoo first.`,
+			),
+		);
+	}
+
+	yield* Console.log(`Company base currency: ${baseCurrency}`);
+
+	const targetCurrency = yield* promptRequired(
+		`Currency to backfill rates for (relative to ${baseCurrency})`,
+	);
+
+	yield* Console.log(
+		`Resolving currency "${targetCurrency.toUpperCase()}" in Odoo...`,
+	);
+	const currencyId = yield* OdooService.resolveCurrencyId(
+		client,
+		targetCurrency,
+	);
+
+	const latestRateDate = yield* OdooService.fetchLatestCurrencyRateDate(
+		client,
+		currencyId,
+		selectedCompany.id,
+	);
+
+	if (!latestRateDate) {
+		return yield* Effect.fail(
+			new Error(
+				`No existing ${targetCurrency.toUpperCase()} rates found in Odoo for company "${selectedCompany.name}". Cannot determine to-date. Add at least one rate manually first.`,
+			),
+		);
+	}
+
+	yield* Console.log(
+		`Latest existing ${targetCurrency.toUpperCase()} rate in Odoo: ${latestRateDate}`,
+	);
+
+	const fromDate = yield* promptIsoDate("From date (YYYY-MM-DD)");
+	const toDate = latestRateDate;
+
+	yield* Console.log(
+		`\nFetching ${baseCurrency} -> ${targetCurrency.toUpperCase()} rates (${fromDate} to ${toDate})...`,
+	);
+
+	const rates = yield* FrankfurterService.fetchTimeSeriesRates({
+		base: baseCurrency,
+		symbol: targetCurrency.toUpperCase(),
+		fromDate,
+		toDate,
+	});
+
+	if (rates.length === 0) {
+		yield* Console.log(
+			"No rates found for the given currencies and date range.",
+		);
+		return;
+	}
+
+	yield* Console.log(`Fetched ${rates.length} rate(s) from Frankfurter.`);
+
+	yield* Console.log("Checking for existing rates in Odoo...");
+	const existingDates = yield* OdooService.fetchCurrencyRateDates(
+		client,
+		currencyId,
+		fromDate,
+		toDate,
+		selectedCompany.id,
+	);
+
+	const newRates = rates.filter((r) => !existingDates.has(r.date));
+
+	if (newRates.length === 0) {
+		yield* Console.log(
+			"All rates already exist in Odoo. Nothing to create.",
+		);
+		return;
+	}
+
+	yield* Console.log(
+		`${existingDates.size} rate(s) already exist. Creating ${newRates.length} new rate(s)...`,
+	);
+
+	const batches = chunk(newRates, 200);
+	let created = 0;
+
+	for (const batch of batches) {
+		yield* OdooService.createCurrencyRateBatch(
+			client,
+			batch.map((r) => ({
+				currencyId,
+				date: r.date,
+				rate: r.rate,
+				companyId: selectedCompany.id,
+			})),
+		);
+		created += batch.length;
+		yield* Console.log(`Created ${created}/${newRates.length} rate(s)...`);
+	}
+
+	yield* Console.log("\nBackfill completed.");
+	yield* Console.log(
+		`Company: ${selectedCompany.name} (id=${selectedCompany.id})`,
+	);
+	yield* Console.log(
+		`Currency: ${targetCurrency.toUpperCase()} (Odoo id=${currencyId})`,
+	);
+	yield* Console.log(`Date range: ${fromDate} to ${toDate}`);
+	yield* Console.log(`Rates fetched from Frankfurter: ${rates.length}`);
+	yield* Console.log(`Already existing in Odoo: ${existingDates.size}`);
+	yield* Console.log(`Newly created: ${created}`);
+});
+
 const setupCommand = Command.make("setup", {}, () => setupProgram).pipe(
 	Command.withDescription(
 		"Manage config profiles (add, edit, remove) for Odoo + ERC-20 sync",
@@ -843,13 +1020,23 @@ const syncCommand = Command.make(
 	Command.withDescription("Import ERC-20 transfer transaction data into Odoo"),
 );
 
+const backfillRatesCommand = Command.make(
+	"backfill-rates",
+	{},
+	() => backfillRatesProgram,
+).pipe(
+	Command.withDescription(
+		"Backfill historical currency conversion rates from Frankfurter API into Odoo",
+	),
+);
+
 const rootCommand = Command.make("crypto-odoo-sync", {}, () =>
-	Console.log("Use a subcommand: setup or sync"),
+	Console.log("Use a subcommand: setup, sync, or backfill-rates"),
 ).pipe(
 	Command.withDescription(
 		"Transfer ERC-20 transaction data into an Odoo journal",
 	),
-	Command.withSubcommands([setupCommand, syncCommand]),
+	Command.withSubcommands([setupCommand, syncCommand, backfillRatesCommand]),
 );
 
 const cli = Command.run(rootCommand, {
@@ -857,7 +1044,11 @@ const cli = Command.run(rootCommand, {
 	version: "v0.2.0",
 });
 
-const serviceLayer = Layer.mergeAll(OdooService.Default, RpcService.Default);
+const serviceLayer = Layer.mergeAll(
+	OdooService.Default,
+	RpcService.Default,
+	FrankfurterService.Default,
+);
 
 cli(process.argv).pipe(
 	Effect.provide(serviceLayer),

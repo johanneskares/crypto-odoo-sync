@@ -34,6 +34,7 @@ export interface OdooJournalRecord {
 export interface OdooCompanyRecord {
   id: number;
   name: string;
+  currency_id: false | number | [number, string];
 }
 
 interface OdooErrorPayload {
@@ -135,6 +136,7 @@ export interface OdooSearchReadParams {
   domain: OdooDomain;
   fields: string[];
   limit?: number;
+  order?: string;
 }
 
 export interface OdooClient {
@@ -177,7 +179,7 @@ export const makeOdooClient = (config: OdooClientConfig): OdooClient => ({
 export const listCompanies = (client: OdooClient) =>
   client.searchRead<OdooCompanyRecord>("res.company", {
     domain: [],
-    fields: ["id", "name"],
+    fields: ["id", "name", "currency_id"],
     limit: 500,
   });
 
@@ -282,6 +284,70 @@ export const fetchExistingImportIds = (
     return existing;
   });
 
+export const fetchLatestCurrencyRateDate = (
+  client: OdooClient,
+  currencyId: number,
+  companyId?: number,
+): OdooEffect<string | undefined> => {
+  const domain: OdooDomainTerm[] = [["currency_id", "=", currencyId]];
+  if (companyId !== undefined) {
+    domain.push(["company_id", "=", companyId]);
+  }
+  return client
+    .searchRead<{ name: string }>("res.currency.rate", {
+      domain,
+      fields: ["name"],
+      limit: 1,
+      order: "name desc",
+    })
+    .pipe(Effect.map((rows) => rows[0]?.name));
+};
+
+export interface CurrencyRateInput {
+  currencyId: number;
+  date: string;
+  rate: number;
+  companyId?: number;
+}
+
+export const fetchCurrencyRateDates = (
+  client: OdooClient,
+  currencyId: number,
+  fromDate: string,
+  toDate: string,
+  companyId?: number,
+): OdooEffect<Set<string>> => {
+  const domain: OdooDomainTerm[] = [
+    ["currency_id", "=", currencyId],
+    ["name", ">=", fromDate],
+    ["name", "<=", toDate],
+  ];
+  if (companyId !== undefined) {
+    domain.push(["company_id", "=", companyId]);
+  }
+  return client
+    .searchRead<{ name: string }>("res.currency.rate", {
+      domain,
+      fields: ["name"],
+      limit: 10000,
+    })
+    .pipe(Effect.map((rows) => new Set(rows.map((r) => r.name))));
+};
+
+export const createCurrencyRateBatch = (
+  client: OdooClient,
+  rates: ReadonlyArray<CurrencyRateInput>,
+): OdooEffect<readonly number[]> =>
+  client.createBatch(
+    "res.currency.rate",
+    rates.map((r) => ({
+      currency_id: r.currencyId,
+      name: r.date,
+      rate: r.rate,
+      ...(r.companyId !== undefined ? { company_id: r.companyId } : {}),
+    })),
+  );
+
 export class OdooService extends Effect.Service<OdooService>()("OdooService", {
   succeed: {
     listCompanies: (config: OdooClientConfig) => listCompanies(makeOdooClient(config)),
@@ -297,6 +363,24 @@ export class OdooService extends Effect.Service<OdooService>()("OdooService", {
       config: OdooClientConfig,
       lines: ReadonlyArray<OdooObject>
     ) => makeOdooClient(config).createBatch("account.bank.statement.line", [...lines]),
+    resolveCurrencyId: (config: OdooClientConfig, currencyCode: string) =>
+      resolveCurrencyId(makeOdooClient(config), currencyCode),
+    fetchLatestCurrencyRateDate: (
+      config: OdooClientConfig,
+      currencyId: number,
+      companyId?: number,
+    ) => fetchLatestCurrencyRateDate(makeOdooClient(config), currencyId, companyId),
+    fetchCurrencyRateDates: (
+      config: OdooClientConfig,
+      currencyId: number,
+      fromDate: string,
+      toDate: string,
+      companyId?: number,
+    ) => fetchCurrencyRateDates(makeOdooClient(config), currencyId, fromDate, toDate, companyId),
+    createCurrencyRateBatch: (
+      config: OdooClientConfig,
+      rates: ReadonlyArray<CurrencyRateInput>,
+    ) => createCurrencyRateBatch(makeOdooClient(config), rates),
   },
   accessors: true,
 }) {}

@@ -93,7 +93,6 @@ Then it:
 ```bash
 bun run setup
 bun run sync
-bun run sync -- --verbose
 bun run sync -- --log-level debug
 bun run start -- --help
 ```
