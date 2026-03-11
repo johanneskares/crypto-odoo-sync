@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.3.0...v1.4.0) (2026-03-11)
+
+
+### Features
+
+* add backfill-rates command to import historical currency rates from Frankfurter API into Odoo ([db84de1](https://github.com/johanneskares/crypto-odoo-sync/commit/db84de1ca132c85f51210ae561e48a360f254fe0))
+
 # [1.3.0](https://github.com/johanneskares/crypto-odoo-sync/compare/v1.2.1...v1.3.0) (2026-02-28)
 
 
